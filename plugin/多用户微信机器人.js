@@ -384,7 +384,10 @@ async function pollQRCodeLoop(sessionKey) {
           
           try {
             if (login.pluginInstance) {
-              await login.pluginInstance.reply('✅ 登录成功！微信机器人已启动！')
+              let replyMsg = '✅ 登录成功！微信机器人已启动！\n\n'
+              replyMsg += '💡 提示：现在可以发送 #更改人设 来设置你的专属人设哦！\n'
+              replyMsg += '（也可以发送 #当前人设 查看当前人设）'
+              await login.pluginInstance.reply(replyMsg)
             }
           } catch (e) {}
           
@@ -935,6 +938,7 @@ export class AI_MultiUser_Bot extends plugin {
       rule: [
         { reg: '^#登录微信AI$', fnc: 'loginWeixin' },
         { reg: '^#更改人设', fnc: 'changePersona' },
+        { reg: '^#当前人设$', fnc: 'showCurrentPersona' },
         { reg: '^#清除记忆$', fnc: 'clearMemoryCmd' },
         { reg: '^#我的信息$', fnc: 'showMyInfo' },
         { reg: '^#微信机器人在线列表$', fnc: 'listOnlineBots' },
@@ -1079,11 +1083,12 @@ export class AI_MultiUser_Bot extends plugin {
     const account = loadAccount(userId)
     
     if (!account || !account.token) {
-      await this.reply('未找到账号或未登录，请先发送 #登录微信AI 登录')
+      await this.reply('您当前未注册机器人，请先发送 #登录微信AI 登录')
       return true
     }
     
     const now = Date.now()
+    const isOnline = accountMonitors.has(userId)
     
     const chatMem = loadMemory(userId)
     let totalMsgs = chatMem.length
@@ -1110,6 +1115,10 @@ export class AI_MultiUser_Bot extends plugin {
       infoText += `年龄：${account.age}\n`
     }
     infoText += '────────────────\n'
+    infoText += `🤖 机器人信息\n`
+    infoText += `机器人ID：${account.accountId || '未知'}\n`
+    infoText += `在线状态：${isOnline ? '🟢 在线' : '🔴 离线'}\n`
+    infoText += '────────────────\n'
     infoText += `💬 对话统计\n`
     infoText += `总消息数：${totalMsgs} 条\n`
     infoText += `你发送：${userMsgs} 条\n`
@@ -1119,16 +1128,7 @@ export class AI_MultiUser_Bot extends plugin {
     infoText += `认识天数：${daysSinceCreation} 天\n`
     infoText += `距上次在线：${daysSinceLastActive} 天\n`
     infoText += '────────────────\n'
-    infoText += `🧠 记忆文件：${memoryCount} 个\n`
-    
-    saveMemoryItem(userId, {
-      title: '查看个人信息',
-      importance: 'normal',
-      type: 'info',
-      content: `用户查看了自己的个人信息，当前共有${totalMsgs}条对话，${memoryCount}个记忆文件`,
-      userText: '#我的信息',
-      assistantText: infoText
-    })
+    infoText += `🧠 记忆条数：${memoryCount} 条\n`
     
     await this.reply(infoText)
     return true
@@ -1216,9 +1216,28 @@ export class AI_MultiUser_Bot extends plugin {
     return true
   }
   
+  async showCurrentPersona() {
+    const userId = this.e.user_id
+    const account = loadAccount(userId)
+    
+    if (!account || !account.token) {
+      await this.reply('未找到账号或未登录，请先发送 #登录微信AI 登录')
+      return true
+    }
+    
+    const persona = loadPersona(userId)
+    
+    let response = '👤 当前人设\n'
+    response += '────────────────\n'
+    response += persona
+    
+    await this.reply(response)
+    return true
+  }
+  
   async showHelp() {
     await this.reply(
-      `多用户微信机器人帮助:\n\n#登录微信AI - 获取二维码登录微信\n#更改人设 人设内容 - 修改自己的人设（需已登录并运行）\n  （支持多行、任意长度的人设内容）\n#清除记忆 - 清除自己的聊天记忆（需已登录）\n#我的信息 - 查看个人信息和统计数据（需已登录）\n#微信机器人在线列表 - 查看所有账号状态\n#停止机器人 [用户ID] - 停止指定账号\n#启动机器人 [用户ID] - 启动指定账号\n#删除机器人 [用户ID] - 删除账号\n\n普通用户: #登录微信AI 登录自己的微信\n主人: 可以管理所有账号`
+      `多用户微信机器人帮助:\n\n📱 登录与人设\n#登录微信AI - 获取二维码登录微信\n#更改人设 人设内容 - 修改自己的人设（需已登录并运行）\n  （支持多行、任意长度的人设内容）\n\n📝 人设与记忆\n#当前人设 - 查看当前人设（需已登录）\n#清除记忆 - 清除自己的聊天记忆（需已登录）\n#我的信息 - 查看个人信息和统计数据（需已登录）\n\n🤖 机器人管理\n#微信机器人在线列表 - 查看所有账号状态\n#停止机器人 [用户ID] - 停止指定账号\n#启动机器人 [用户ID] - 启动指定账号\n#删除机器人 [用户ID] - 删除账号\n\n普通用户: #登录微信AI 登录自己的微信\n主人: 可以管理所有账号`
     )
     return true
   }
