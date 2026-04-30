@@ -16,10 +16,11 @@
 
 ## 项目信息
 
-- **项目路径**: `d:\葵机器人\XRK-AGT\core\AI-MultiUser-Core
+- **项目路径**: `core/AI-MultiUser-Core
 - **项目名称**: AI-MultiUser-Core
-- **版本**: 2.0.0
+- **版本**: 8.0.0
 - **开源协议**: MIT License
+- **依赖项目**: [XRK-AGT](https://github.com/sunflowermm/XRK-AGT)
 
 ---
 
@@ -43,8 +44,8 @@
 
 ```json
 {
-  "apiUrl": "https://api.minewuer.com/v1/chat/completions",
-  "apiKey": "sk-f3w2D0MEv43Fc2nZ2I7ljU7xrVa4tgctxAckE3LPWSbG6Le",
+  "apiUrl": "https://api.example.com/v1/chat/completions",
+  "apiKey": "sk-xxx",
   "model": "deepseek-v4-pro-chat",
   "temperature": 0.7,
   "maxTokens": 1000
