@@ -7,7 +7,7 @@
 ## 📋 项目信息
 
 - **项目名称**: AI-MultiUser-Core
-- **版本**: 8.0.0
+- **版本**: 9.0.0
 - **开源协议**: MIT License
 - **项目路径**: `core/AI-MultiUser-Core`
 - **依赖项目**: [XRK-AGT](https://github.com/sunflowermm/XRK-AGT)

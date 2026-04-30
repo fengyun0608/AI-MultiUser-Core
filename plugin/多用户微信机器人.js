@@ -3,8 +3,7 @@ import path from 'node:path'
 import { randomUUID } from 'node:crypto'
 import puppeteer from 'puppeteer'
 
-const DATA_ROOT = path.join(process.cwd(), 'data')
-const TEMP_DIR = path.join(DATA_ROOT, 'temp', 'multiuser-wechat')
+const TEMP_DIR = path.join(process.cwd(), 'data', 'temp', 'multiuser-wechat')
 
 if (!fs.existsSync(TEMP_DIR)) {
   fs.mkdirSync(TEMP_DIR, { recursive: true })
@@ -489,6 +488,12 @@ function loadPersona(userId) {
   return '你是一个友好、有趣的微信聊天伙伴，喜欢分享日常，说话自然不生硬。'
 }
 
+function savePersona(userId, persona) {
+  const personaPath = getPersonaPath(userId)
+  fs.writeFileSync(personaPath, persona, 'utf8')
+  console.log(`[多用户微信机器人] ${userId} 人设已更新`)
+}
+
 function loadMemory(userId) {
   const memPath = getMemoryPath(userId)
   if (fs.existsSync(memPath)) {
@@ -757,14 +762,8 @@ ${text}
       console.log('[多用户微信机器人] 微信消息发送完成')
     }
   } else {
-    console.log('[多用户微信机器人] 跳过处理，text为空或为空或为命令')
+    console.log('[多用户微信机器人] 跳过处理，text为空或为命令')
   }
-}
-
-function sanitizeAccountForLog(account) {
-  if (!account) return account
-  const safe = { ...account, token: account.token ? '[REDACTED]' : undefined }
-  return safe
 }
 
 let existingAccountsLoaded = false
@@ -777,6 +776,7 @@ export class AI_MultiUser_Bot extends plugin {
       event: 'message', priority: 4000,
       rule: [
         { reg: '^#登录微信AI$', fnc: 'loginWeixin' },
+        { reg: '^#更改人设(.*)$', fnc: 'changePersona' },
         { reg: '^#微信机器人在线列表$', fnc: 'listOnlineBots' },
         { reg: '^#停止机器人(.*)$', fnc: 'stopBot' },
         { reg: '^#启动机器人(.*)$', fnc: 'startBot' },
@@ -898,10 +898,37 @@ export class AI_MultiUser_Bot extends plugin {
     await this.reply('账号已删除')
     return true
   }
+
+  async changePersona() {
+    const userId = this.e.user_id
+    const account = loadAccount(userId)
+    
+    if (!account || !account.token) {
+      await this.reply('未找到账号或未登录，请先发送 #登录微信AI 登录')
+      return true
+    }
+    
+    const isRunning = accountMonitors.has(userId)
+    if (!isRunning) {
+      await this.reply('账号未运行，请先发送 #启动机器人 启动账号')
+      return true
+    }
+    
+    const newPersona = this.e.msg.replace('#更改人设', '').trim()
+    
+    if (!newPersona) {
+      await this.reply('请输入人设内容，格式：#更改人设 你的人设内容')
+      return true
+    }
+    
+    savePersona(userId, newPersona)
+    await this.reply('人设已更新！立即生效')
+    return true
+  }
   
   async showHelp() {
     await this.reply(
-      `多用户微信机器人帮助:\n\n#登录微信AI - 获取二维码登录微信\n#微信机器人在线列表 - 查看所有账号状态\n#停止机器人 [用户ID] - 停止指定账号\n#启动机器人 [用户ID] - 启动指定账号\n#删除机器人 [用户ID] - 删除账号\n\n普通用户: #登录微信AI 登录自己的微信\n主人: 可以管理所有账号`
+      `多用户微信机器人帮助:\n\n#登录微信AI - 获取二维码登录微信\n#更改人设 人设内容 - 修改自己的人设（需已登录并运行）\n#微信机器人在线列表 - 查看所有账号状态\n#停止机器人 [用户ID] - 停止指定账号\n#启动机器人 [用户ID] - 启动指定账号\n#删除机器人 [用户ID] - 删除账号\n\n普通用户: #登录微信AI 登录自己的微信\n主人: 可以管理所有账号`
     )
     return true
   }
