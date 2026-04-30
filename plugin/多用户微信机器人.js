@@ -1094,11 +1094,8 @@ export class AI_MultiUser_Bot extends plugin {
       else if (msg.role === 'assistant') assistantMsgs++
     }
     
-    const memoriesDir = getMemoriesDir(userId)
-    let memoryCount = 0
-    if (fs.existsSync(memoriesDir)) {
-      memoryCount = fs.readdirSync(memoriesDir).filter(f => f.endsWith('.json')).length
-    }
+    const allMemories = getAllMemories(userId)
+    const memoryCount = allMemories.length
     
     const createdAt = account.createdAt || now
     const lastActiveAt = account.lastActiveAt || createdAt
@@ -1116,7 +1113,7 @@ export class AI_MultiUser_Bot extends plugin {
     infoText += `💬 对话统计\n`
     infoText += `总消息数：${totalMsgs} 条\n`
     infoText += `你发送：${userMsgs} 条\n`
-    infoText += `我回复：${assistantMsgs} 条\n`
+    infoText += `机器人回复：${assistantMsgs} 条\n`
     infoText += '────────────────\n'
     infoText += `⏰ 时间统计\n`
     infoText += `认识天数：${daysSinceCreation} 天\n`
