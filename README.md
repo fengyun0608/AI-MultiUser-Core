@@ -9,7 +9,7 @@
 - **项目名称**: AI-MultiUser-Core
 - **版本**: 8.0.0
 - **开源协议**: MIT License
-- **项目路径**: `d:\葵机器人\XRK-AGT\core\AI-MultiUser-Core`
+- **项目路径**: `XRK-AGT\core\AI-MultiUser-Core`
 
 ---
 
