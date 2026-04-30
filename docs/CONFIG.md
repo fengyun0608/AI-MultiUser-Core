@@ -18,7 +18,7 @@
 
 - **项目路径**: `core/AI-MultiUser-Core`
 - **项目名称**: AI-MultiUser-Core
-- **版本**: 9.0.0
+- **版本**: 10.0.0
 - **开源协议**: MIT License
 - **依赖项目**: [XRK-AGT](https://github.com/sunflowermm/XRK-AGT)
 
@@ -164,3 +164,4 @@
 - 每个用户有独立的人设文件
 - 新用户登录时自动复制默认人设
 - 可随时编辑个人人设文件，立即生效
+- 可在QQ群中使用 `#更改人设` 命令直接修改人设

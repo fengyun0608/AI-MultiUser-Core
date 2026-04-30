@@ -776,7 +776,7 @@ export class AI_MultiUser_Bot extends plugin {
       event: 'message', priority: 4000,
       rule: [
         { reg: '^#登录微信AI$', fnc: 'loginWeixin' },
-        { reg: '^#更改人设(.*)$', fnc: 'changePersona' },
+        { reg: '^#更改人设', fnc: 'changePersona' },
         { reg: '^#微信机器人在线列表$', fnc: 'listOnlineBots' },
         { reg: '^#停止机器人(.*)$', fnc: 'stopBot' },
         { reg: '^#启动机器人(.*)$', fnc: 'startBot' },
@@ -914,21 +914,76 @@ export class AI_MultiUser_Bot extends plugin {
       return true
     }
     
-    const newPersona = this.e.msg.replace('#更改人设', '').trim()
+    console.log('[多用户微信机器人] changePersona 开始处理')
+    console.log('[多用户微信机器人] this.e.message:', JSON.stringify(this.e.message))
+    console.log('[多用户微信机器人] this.e.msg:', JSON.stringify(this.e.msg))
     
-    if (!newPersona) {
-      await this.reply('请输入人设内容，格式：#更改人设 你的人设内容')
+    // 获取完整的人设内容
+    let newPersona = ''
+    
+    // 方式1: 尝试使用 this.e.message 数组格式（最完整）
+    if (this.e.message && Array.isArray(this.e.message)) {
+      console.log('[多用户微信机器人] 使用 this.e.message 数组格式')
+      
+      // 检查是否有多个文本段
+      const msgParts = []
+      for (const seg of this.e.message) {
+        if (seg.type === 'text' && seg.text !== undefined) {
+          console.log('[多用户微信机器人] 找到文本段:', JSON.stringify(seg.text))
+          msgParts.push(seg.text)
+        }
+      }
+      
+      if (msgParts.length > 0) {
+        // 直接用每个文本段拼接，保持原样
+        const fullMsg = msgParts.join('')
+        console.log('[多用户微信机器人] 拼接后的完整消息:', JSON.stringify(fullMsg))
+        
+        // 找到 #更改人设 的位置
+        const commandIndex = fullMsg.indexOf('#更改人设')
+        if (commandIndex !== -1) {
+          // 提取命令后的所有内容，不要 trim()，保留换行和首尾空格
+          newPersona = fullMsg.substring(commandIndex + '#更改人设'.length)
+          console.log('[多用户微信机器人] 提取到的人设内容:', JSON.stringify(newPersona))
+        } else {
+          // 没有找到命令，使用全部内容
+          newPersona = fullMsg
+        }
+      }
+    }
+    
+    // 方式2: 尝试使用 this.e.msg
+    if (!newPersona && this.e.msg) {
+      console.log('[多用户微信机器人] 回退到使用 this.e.msg')
+      console.log('[多用户微信机器人] this.e.msg:', JSON.stringify(this.e.msg))
+      
+      const commandIndex = this.e.msg.indexOf('#更改人设')
+      if (commandIndex !== -1) {
+        newPersona = this.e.msg.substring(commandIndex + '#更改人设'.length)
+      } else {
+        newPersona = this.e.msg
+      }
+    }
+    
+    console.log('[多用户微信机器人] 最终人设内容（长度:', newPersona.length, '）:', JSON.stringify(newPersona))
+    
+    // 检查人设内容是否有效
+    if (!newPersona || newPersona.trim() === '') {
+      await this.reply('请输入人设内容，格式：\n#更改人设 你的人设内容\n\n提示：支持多行、任意长度的人设')
       return true
     }
     
+    // 保存人设
     savePersona(userId, newPersona)
+    console.log('[多用户微信机器人] 人设已保存')
+    
     await this.reply('人设已更新！立即生效')
     return true
   }
   
   async showHelp() {
     await this.reply(
-      `多用户微信机器人帮助:\n\n#登录微信AI - 获取二维码登录微信\n#更改人设 人设内容 - 修改自己的人设（需已登录并运行）\n#微信机器人在线列表 - 查看所有账号状态\n#停止机器人 [用户ID] - 停止指定账号\n#启动机器人 [用户ID] - 启动指定账号\n#删除机器人 [用户ID] - 删除账号\n\n普通用户: #登录微信AI 登录自己的微信\n主人: 可以管理所有账号`
+      `多用户微信机器人帮助:\n\n#登录微信AI - 获取二维码登录微信\n#更改人设 人设内容 - 修改自己的人设（需已登录并运行）\n  （支持多行、任意长度的人设内容）\n#微信机器人在线列表 - 查看所有账号状态\n#停止机器人 [用户ID] - 停止指定账号\n#启动机器人 [用户ID] - 启动指定账号\n#删除机器人 [用户ID] - 删除账号\n\n普通用户: #登录微信AI 登录自己的微信\n主人: 可以管理所有账号`
     )
     return true
   }
