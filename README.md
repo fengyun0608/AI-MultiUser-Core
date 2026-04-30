@@ -1,16 +1,67 @@
-# AI-MultiUser-Core - 多用户微信机器人系统
+<p align="center">
+  <h1 align="center">🤖 AI-MultiUser-Core</h1>
+  <h3 align="center">多用户微信机器人系统</h3>
+</p>
 
-支持多用户独立登录、独立人设配置、独立聊天记忆的微信机器人系统。
+<p align="center">
+  <a href="https://github.com/fengyun0608/AI-MultiUser-Core">
+    <img src="https://img.shields.io/badge/JavaScript-F7DF1E?style=for-the-badge&logo=javascript&logoColor=black" alt="JavaScript">
+  </a>
+  <a href="https://github.com/fengyun0608/AI-MultiUser-Core/blob/main/LICENSE">
+    <img src="https://img.shields.io/badge/MIT_License-007EC6?style=for-the-badge&logo=mit&logoColor=white" alt="MIT License">
+  </a>
+  <a href="https://github.com/fengyun0608/AI-MultiUser-Core">
+    <img src="https://img.shields.io/badge/Version-12.1.0-00ADD8?style=for-the-badge" alt="Version">
+  </a>
+  <a href="https://github.com/fengyun0608/AI-MultiUser-Core/stargazers">
+    <img src="https://img.shields.io/github/stars/fengyun0608/AI-MultiUser-Core?style=for-the-badge&logo=github" alt="GitHub stars">
+  </a>
+</p>
+
+<p align="center">
+  <a href="https://github.com/fengyun0608/AI-MultiUser-Core/issues">
+    <img src="https://img.shields.io/github/issues/fengyun0608/AI-MultiUser-Core?style=flat-square" alt="GitHub issues">
+  </a>
+  <a href="https://github.com/fengyun0608/AI-MultiUser-Core/forks">
+    <img src="https://img.shields.io/github/forks/fengyun0608/AI-MultiUser-Core?style=flat-square" alt="GitHub forks">
+  </a>
+  <a href="https://github.com/fengyun0608/AI-MultiUser-Core">
+    <img src="https://img.shields.io/github/release/fengyun0608/AI-MultiUser-Core?style=flat-square" alt="GitHub release">
+  </a>
+</p>
+
+<p align="center">
+  支持多用户独立登录、独立人设配置、独立聊天记忆的微信机器人系统！
+</p>
+
+---
+
+## 👥 作者信息
+
+- **陈家锐** - 仙桃二中长虹路校区
+  - **项目负责人**
+  - 项目设计与测试
+  - 功能规划与优化
+
+- **风云科技-风云** - 项目主要开发
 
 ---
 
 ## 📋 项目信息
 
 - **项目名称**: AI-MultiUser-Core
-- **版本**: 12.1.012.1.011.2.0
+- **版本**: 12.1.0
 - **开源协议**: MIT License
 - **项目路径**: core/AI-MultiUser-Core
 - **依赖项目**: [XRK-AGT](https://github.com/sunflowermm/XRK-AGT)
+
+---
+
+## 💡 项目简介
+
+支持多用户独立登录、独立人设配置、独立聊天记忆的微信机器人系统。
+
+让每个人都能拥有专属的 AI 聊天伙伴，体验真人般的对话乐趣！
 
 ---
 
@@ -180,6 +231,36 @@ AI-MultiUser-Core/
 ## 📦 依赖项目
 
 本项目依赖 [XRK-AGT](https://github.com/sunflowermm/XRK-AGT) 框架。
+
+## 📞 交流方式
+
+欢迎加入 QQ 群交流讨论！
+
+- **QQ 群号**: 1040559624
+
+在群里你可以：
+- 提出问题和建议
+- 分享你的使用体验
+- 认识更多志同道合的朋友
+
+---
+
+## 📊 项目统计
+
+本项目持续更新，感谢大家的支持！
+
+### GitHub 统计
+[![GitHub stars](https://img.shields.io/github/stars/fengyun0608/AI-MultiUser-Core?style=social)](https://github.com/fengyun0608/AI-MultiUser-Core/stargazers)
+[![GitHub downloads](https://img.shields.io/github/downloads/fengyun0608/AI-MultiUser-Core/total?style=flat-square)](https://github.com/fengyun0608/AI-MultiUser-Core/releases)
+
+### 功能特性
+- ✅ **多用户支持** - 无限用户独立登录
+- 🧠 **智能记忆** - 长期记忆保存
+- 🎭 **自定义人设** - 任意角色设定
+- 💬 **真人体验** - 多段发送+打字延迟
+- 🔒 **数据隔离** - 用户数据完全独立
+
+---
 
 ## 📄 许可证
 
