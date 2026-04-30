@@ -49,6 +49,40 @@ if (!fs.existsSync(DATA_DIR)) {
 const activeLogins = new Map()
 const accountMonitors = new Map()
 
+// 限流控制：更宽松的设置
+let apiRequestTimes = []
+const MAX_REQUESTS_PER_MINUTE = 80 // 50个用户，每人每分钟平均1-2次
+const MIN_INTERVAL_PER_USER = 3000 // 同一个用户至少间隔3秒
+
+// 记录每个用户最后请求时间
+const userLastRequestTimes = new Map()
+
+function checkRateLimit(userId) {
+  // 先检查用户最小间隔
+  const now = Date.now()
+  const lastTime = userLastRequestTimes.get(userId)
+  if (lastTime && now - lastTime < MIN_INTERVAL_PER_USER) {
+    console.log(`[多用户微信机器人] ${userId} 请求太快，跳过`)
+    return false
+  }
+  
+  // 再检查全局限流
+  const oneMinuteAgo = now - 60 * 1000
+  apiRequestTimes = apiRequestTimes.filter(t => t > oneMinuteAgo)
+  if (apiRequestTimes.length >= MAX_REQUESTS_PER_MINUTE) {
+    console.log('[多用户微信机器人] 全局限流已达上限，跳过')
+    return false
+  }
+  
+  return true
+}
+
+function addRateLimit(userId) {
+  const now = Date.now()
+  userLastRequestTimes.set(userId, now)
+  apiRequestTimes.push(now)
+}
+
 function randomWechatUin() {
   const uint32 = new Uint32Array(1)
   uint32[0] = Math.random() * 0xFFFFFF
@@ -642,14 +676,21 @@ function loadPluginConfig() {
   return cachedConfig
 }
 
-async function callAI(prompt) {
+async function callAI(prompt, userId) {
+  // 先检查限流
+  if (!checkRateLimit(userId)) {
+    return null
+  }
+  
   try {
     const config = loadPluginConfig()
     if (!config) {
       console.error('[多用户微信机器人] 插件配置未找到')
-      return '抱歉，我现在有点忙，稍后回复你。'
+      return null
     }
 
+    addRateLimit(userId)
+    
     const response = await fetch(config.apiUrl, {
       method: 'POST',
       headers: {
@@ -676,10 +717,10 @@ async function callAI(prompt) {
     }
 
     const data = await response.json()
-    return data.choices?.[0]?.message?.content || '抱歉，我现在有点忙，稍后回复你。'
+    return data.choices?.[0]?.message?.content || null
   } catch (e) {
     console.error('[多用户微信机器人] AI 调用失败', e)
-    return '抱歉，我现在有点忙，稍后回复你。'
+    return null
   }
 }
 
@@ -846,20 +887,21 @@ ${text}
 12. 不要一味跟着人设里的死规则走，要跟着人设里的情绪走
 13. 要有情绪！开心、生气、害羞、不耐烦等所有情绪都可以有，但情绪完全按人设来
 14. 如果对方问"你在干什么"或类似的问题，要说你人设里有的事情，比如在拍照、整理照片、休息等
-15. 像真人一样聊天！不要一直重复之前的话题，如果对方明显不想聊了，就自然结束或换个轻松的话题
+15. 像真人一样聊天！【绝对不要一直重复旧话题！】如果发现自己在说之前聊过的事，立刻换个新话题
 16. 聊天要灵活！如果同一个话题已经聊了好几轮，就可以主动收尾或换个话题，不要一直揪着不放
 17. 如果发现自己一直在聊同一件事，主动换个轻松的话题或者自然结束
-18. 人设是最高优先级，千万记住
-19. 分成短段落（每段10字内），最多不超过10段
-20. 语气真诚，像真人在聊天一样
-21. 回复要完整！不要说半截话，每一段都要是完整的意思，不要让人感觉后面还要说话
-22. 回复要有结尾感！不要用问句或悬念结尾，每轮对话都要有明确的结束感，让对方知道你说完了
-23. 人设是最高优先级，真的很重要
-24. 人设是最高优先级，一定要记住！
-25. 关于动作描述：只有当【你的人设】里明确要求有动作描述时，才可以使用；如果人设里没有动作描述相关的要求，绝对禁止输出任何动作描述（比如"（xxx）"这种形式）！只输出纯文本对话！`
+18. 【不要重复对方已经说过多次的内容！】不要一直提同样的事情，要有新鲜感
+19. 人设是最高优先级，千万记住
+20. 分成短段落（每段10字内），最多不超过10段
+21. 语气真诚，像真人在聊天一样
+22. 回复要完整！不要说半截话，每一段都要是完整的意思，不要让人感觉后面还要说话
+23. 回复要有结尾感！不要用问句或悬念结尾，每轮对话都要有明确的结束感，让对方知道你说完了
+24. 人设是最高优先级，真的很重要
+25. 人设是最高优先级，一定要记住！
+26. 关于动作描述：只有当【你的人设】里明确要求有动作描述时，才可以使用；如果人设里没有动作描述相关的要求，绝对禁止输出任何动作描述（比如"（xxx）"这种形式）！只输出纯文本对话！`
 
     console.log('[多用户微信机器人] 调用AI中...')
-    const aiResponse = await callAI(prompt)
+    const aiResponse = await callAI(prompt, userId)
     console.log('[多用户微信机器人] AI回复:', aiResponse)
     
     if (aiResponse && aiResponse.trim()) {
@@ -908,6 +950,7 @@ export class AI_MultiUser_Bot extends plugin {
         { reg: '^[#＃]清除记忆$', fnc: 'clearMemoryCmd' },
         { reg: '^[#＃]我的信息$', fnc: 'showMyInfo' },
         { reg: '^[#＃]微信机器人在线列表$', fnc: 'listOnlineBots' },
+        { reg: '^[#＃]在线用户$', fnc: 'showOnlineUsers' },
         { reg: '^[#＃]停止机器人(.*)$', fnc: 'stopBot' },
         { reg: '^[#＃]启动机器人(.*)$', fnc: 'startBot' },
         { reg: '^[#＃]删除机器人(.*)$', fnc: 'deleteBot' },
@@ -964,21 +1007,80 @@ export class AI_MultiUser_Bot extends plugin {
   
   async listOnlineBots() {
     const accounts = getAllAccounts()
-    let replyText = '在线机器人列表:\n\n'
     
     if (accounts.length === 0) {
-      replyText += '没有账号'
-    } else {
-      for (const account of accounts) {
+      await this.reply('没有账号')
+      return true
+    }
+    
+    // 分成两条消息发送，避免太长
+    const halfIndex = Math.ceil(accounts.length / 2)
+    const part1 = accounts.slice(0, halfIndex)
+    const part2 = accounts.slice(halfIndex)
+    
+    // 第一条消息
+    let replyText1 = '在线机器人列表（上半部分）:\n\n'
+    for (const account of part1) {
+      const isRunning = accountMonitors.has(account.userId)
+      replyText1 += `ID: ${account.userId}\n`
+      replyText1 += `状态: ${isRunning ? '🟢 运行中' : '🔴 已停止'}\n`
+      replyText1 += `微信ID: ${account.accountId || '未知'}\n`
+      replyText1 += '---\n'
+    }
+    await this.reply(replyText1)
+    
+    // 第二条消息
+    if (part2.length > 0) {
+      let replyText2 = '在线机器人列表（下半部分）:\n\n'
+      for (const account of part2) {
         const isRunning = accountMonitors.has(account.userId)
-        replyText += `ID: ${account.userId}\n`
-        replyText += `状态: ${isRunning ? '🟢 运行中' : '🔴 已停止'}\n`
-        replyText += `微信ID: ${account.accountId || '未知'}\n`
-        replyText += '---\n'
+        replyText2 += `ID: ${account.userId}\n`
+        replyText2 += `状态: ${isRunning ? '🟢 运行中' : '🔴 已停止'}\n`
+        replyText2 += `微信ID: ${account.accountId || '未知'}\n`
+        replyText2 += '---\n'
+      }
+      await this.reply(replyText2)
+    }
+    
+    return true
+  }
+  
+  async showOnlineUsers() {
+    const accounts = getAllAccounts()
+    
+    let onlineText = '🟢 在线用户:\n'
+    let offlineText = '🔴 离线用户:\n'
+    let onlineCount = 0
+    let offlineCount = 0
+    
+    for (const account of accounts) {
+      const isRunning = accountMonitors.has(account.userId)
+      if (isRunning) {
+        onlineText += `${account.userId} (微信: ${account.accountId || '未知'})\n`
+        onlineCount++
+      } else {
+        offlineText += `${account.userId} (微信: ${account.accountId || '未知'})\n`
+        offlineCount++
       }
     }
     
-    await this.reply(replyText)
+    let finalReply = `📊 机器人在线情况\n\n`
+    finalReply += `🟢 在线: ${onlineCount} 人\n`
+    finalReply += `🔴 离线: ${offlineCount} 人\n\n`
+    
+    if (onlineCount > 0) {
+      finalReply += `${onlineText}\n`
+    }
+    
+    if (offlineCount > 0) {
+      finalReply += `${offlineText}\n`
+    }
+    
+    if (accounts.length === 0) {
+      finalReply += '没有任何账号'
+    }
+    
+    await this.reply(finalReply)
     return true
   }
   
