@@ -937,19 +937,19 @@ export class AI_MultiUser_Bot extends plugin {
       dsc: '多用户独立登录微信，独立人设配置和聊天记忆',
       event: 'message', priority: 4000,
       rule: [
-        { reg: '^#登录微信[Aa][Ii]$', fnc: 'loginWeixin' },
-        { reg: '^#微信登录[Aa][Ii]$', fnc: 'loginWeixin' },
-        { reg: '^#更改人设', fnc: 'changePersona' },
-        { reg: '^#当前人设$', fnc: 'showCurrentPersona' },
-        { reg: '^#清除记忆$', fnc: 'clearMemoryCmd' },
-        { reg: '^#我的信息$', fnc: 'showMyInfo' },
-        { reg: '^#微信机器人在线列表$', fnc: 'listOnlineBots' },
-        { reg: '^#停止机器人(.*)$', fnc: 'stopBot' },
-        { reg: '^#启动机器人(.*)$', fnc: 'startBot' },
-        { reg: '^#删除机器人(.*)$', fnc: 'deleteBot' },
-        { reg: '^#关于$', fnc: 'showAbout' },
-        { reg: '^#推广$', fnc: 'showPromotion' },
-        { reg: '^#帮助多用户$', fnc: 'showHelp' }
+        { reg: '^[#＃]登[陆录]微信[Aa][Ii]$', fnc: 'loginWeixin' },
+        { reg: '^[#＃]微信登[陆录][Aa][Ii]$', fnc: 'loginWeixin' },
+        { reg: '^[#＃]更改人设', fnc: 'changePersona' },
+        { reg: '^[#＃]当前人设$', fnc: 'showCurrentPersona' },
+        { reg: '^[#＃]清除记忆$', fnc: 'clearMemoryCmd' },
+        { reg: '^[#＃]我的信息$', fnc: 'showMyInfo' },
+        { reg: '^[#＃]微信机器人在线列表$', fnc: 'listOnlineBots' },
+        { reg: '^[#＃]停止机器人(.*)$', fnc: 'stopBot' },
+        { reg: '^[#＃]启动机器人(.*)$', fnc: 'startBot' },
+        { reg: '^[#＃]删除机器人(.*)$', fnc: 'deleteBot' },
+        { reg: '^[#＃]关于$', fnc: 'showAbout' },
+        { reg: '^[#＃]推广$', fnc: 'showPromotion' },
+        { reg: '^[#＃]帮助多用户$', fnc: 'showHelp' }
       ]
     })
     
