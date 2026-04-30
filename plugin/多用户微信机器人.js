@@ -369,10 +369,14 @@ async function pollQRCodeLoop(sessionKey) {
           
           console.log(`[多用户微信机器人] 登录成功！accountId=${statusResponse.ilink_bot_id}`)
           
+          const existingAccount = loadAccount(sessionKey)
           const account = {
             userId: sessionKey, accountId: statusResponse.ilink_bot_id, token: statusResponse.bot_token,
             baseUrl: statusResponse.base_url || FIXED_BASE_URL, userIdFromWeixin: statusResponse.ilink_user_id,
-            createdAt: Date.now(), enabled: true, get_updates_buf: '',
+            createdAt: existingAccount?.createdAt || Date.now(),
+            lastActiveAt: Date.now(),
+            enabled: true, get_updates_buf: '',
+            ...(existingAccount?.age ? { age: existingAccount.age } : {})
           }
           
           saveAccount(sessionKey, account)
@@ -472,6 +476,29 @@ function getMemoryPath(userId) {
   return path.join(getAccountDir(userId), 'chat-memory.json')
 }
 
+function getMemoriesDir(userId) {
+  return path.join(getAccountDir(userId), 'memories')
+}
+
+function getBeijingTime() {
+  const now = new Date()
+  const beijingOffset = 8 * 60 * 60 * 1000
+  const beijingTime = new Date(now.getTime() + beijingOffset)
+  const year = beijingTime.getUTCFullYear()
+  const month = String(beijingTime.getUTCMonth() + 1).padStart(2, '0')
+  const day = String(beijingTime.getUTCDate()).padStart(2, '0')
+  const hours = String(beijingTime.getUTCHours()).padStart(2, '0')
+  const minutes = String(beijingTime.getUTCMinutes()).padStart(2, '0')
+  const seconds = String(beijingTime.getUTCSeconds()).padStart(2, '0')
+  return {
+    full: `${year}-${month}-${day} ${hours}:${minutes}:${seconds}`,
+    date: `${year}-${month}-${day}`,
+    time: `${hours}:${minutes}:${seconds}`,
+    timestamp: beijingTime.getTime(),
+    year, month, day, hours, minutes, seconds
+  }
+}
+
 function loadPersona(userId) {
   const personaPath = getPersonaPath(userId)
   if (fs.existsSync(personaPath)) {
@@ -523,6 +550,99 @@ function addChatLog(userId, role, text) {
   mem.push({ role, text, timestamp: Date.now() })
   if (mem.length > 50) mem = mem.slice(-50)
   saveMemory(userId, mem)
+}
+
+function clearMemory(userId) {
+  saveMemory(userId, [])
+  
+  const memoriesDir = getMemoriesDir(userId)
+  if (fs.existsSync(memoriesDir)) {
+    const files = fs.readdirSync(memoriesDir).filter(f => f.endsWith('.json'))
+    for (const file of files) {
+      try {
+        fs.unlinkSync(path.join(memoriesDir, file))
+      } catch (e) {}
+    }
+  }
+  
+  console.log(`[多用户微信机器人] ${userId} 聊天记忆和记忆文件已清除`)
+}
+
+function ensureMemoriesDir(userId) {
+  const dir = getMemoriesDir(userId)
+  if (!fs.existsSync(dir)) {
+    fs.mkdirSync(dir, { recursive: true })
+  }
+  return dir
+}
+
+function getAllMemories(userId) {
+  const dir = getMemoriesDir(userId)
+  if (!fs.existsSync(dir)) return []
+  
+  const files = fs.readdirSync(dir).filter(f => f.match(/^\d{4}-\d{2}-\d{2}\.json$/))
+  const memories = []
+  
+  for (const file of files.sort().reverse()) {
+    try {
+      const content = fs.readFileSync(path.join(dir, file), 'utf8')
+      const dayMemories = JSON.parse(content)
+      if (Array.isArray(dayMemories)) {
+        memories.push(...dayMemories.reverse())
+      }
+    } catch (e) {}
+  }
+  
+  return memories
+}
+
+function saveMemoryItem(userId, memoryItem) {
+  const dir = ensureMemoriesDir(userId)
+  const beijingTime = getBeijingTime()
+  const filename = `${beijingTime.date}.json`
+  const filepath = path.join(dir, filename)
+  
+  const fullMemory = {
+    ...memoryItem,
+    timestamp: beijingTime.timestamp,
+    beijingTime: beijingTime.full,
+    date: beijingTime.date,
+    time: beijingTime.time
+  }
+  
+  let dayMemories = []
+  if (fs.existsSync(filepath)) {
+    try {
+      dayMemories = JSON.parse(fs.readFileSync(filepath, 'utf8'))
+      if (!Array.isArray(dayMemories)) dayMemories = []
+    } catch (e) {}
+  }
+  
+  dayMemories.push(fullMemory)
+  fs.writeFileSync(filepath, JSON.stringify(dayMemories, null, 2))
+  console.log(`[多用户微信机器人] ${userId} 保存记忆: ${memoryItem.title}`)
+  return fullMemory
+}
+
+function getRecentMemoriesString(userId, limit = 10) {
+  const memories = getAllMemories(userId).slice(0, limit)
+  if (memories.length === 0) return ''
+  
+  let lines = ['【重要记忆回顾】']
+  for (const m of memories) {
+    const importance = m.importance === 'important' ? '⭐重要' : '📝普通'
+    lines.push(`${importance} [${m.beijingTime}] ${m.title}`)
+    if (m.content) {
+      lines.push(`  ${m.content.substring(0, 100)}${m.content.length > 100 ? '...' : ''}`)
+    }
+  }
+  return lines.join('\n')
+}
+
+function generateSimpleTitle(userText, aiText) {
+  const combined = (userText + ' ' + aiText).trim()
+  if (combined.length <= 20) return combined
+  return combined.substring(0, 17) + '...'
 }
 
 function getChatHistoryString(userId) {
@@ -713,20 +833,28 @@ async function processAccountMessage(userId, account, msg) {
     const fromUser = msg.from_user_id
     const contextToken = msg.context_token
     
+    const currentAccount = loadAccount(userId)
+    if (currentAccount) {
+      currentAccount.lastActiveAt = Date.now()
+      saveAccount(userId, currentAccount)
+    }
+    
     addChatLog(userId, 'user', text)
     
     const personaText = loadPersona(userId)
     const history = getChatHistoryString(userId)
-    
-    const now = new Date()
-    const timeStr = `${now.getFullYear()}-${String(now.getMonth()+1).padStart(2,'0')}-${String(now.getDate()).padStart(2,'0')} ${String(now.getHours()).padStart(2,'0')}:${String(now.getMinutes()).padStart(2,'0')}`
+    const recentMemories = getRecentMemoriesString(userId)
+    const beijingTime = getBeijingTime()
     
     const prompt = `你现在完全扮演这个角色，一言一行都要符合这个人设，不能让别人看出来你是AI：
 
 【你的人设】
 ${personaText}
 
-【当前时间】${timeStr}
+【当前北京时间】${beijingTime.full}
+
+【重要记忆回顾】
+${recentMemories || '（还没有记忆）'}
 
 【聊天记录】
 ${history || '（还没有聊天记录）'}
@@ -734,7 +862,7 @@ ${history || '（还没有聊天记录）'}
 【对方现在说】
 ${text}
 
-请直接按照人设回复，语气自然，像真实的人在聊天，不要解释，不要提到"AI"或"人设"。
+请直接按照人设回复，不要做任何其他事情。
 
 重要提醒：
 1. 【最重要！！！人设是最高优先级，永远按照人设的一切，人设是最大的，比什么都重要
@@ -747,8 +875,8 @@ ${text}
 8. 你有真实的生活，做着你人设里的事情，你不是在扮演，你就是这个人
 9. 发言例句仅供参考，无需按照示例格式输出
 10. 说话长度限制：
-    - 日常对话：1句话，或总字数不超过30字
-    - 专业/探讨内容：最多3句话，或总字数不超过50字
+    - 日常对话：1-10句话，或总字数不超过无限制
+    - 专业/探讨内容：最多10句话，或总字数不超过无限制
 11. 说话请去掉句末的句号
 12. 不要一味跟着人设里的死规则走，要跟着人设里的情绪走
 13. 要有情绪！开心、生气、害羞、不耐烦等所有情绪都可以有，但情绪完全按人设来
@@ -757,20 +885,35 @@ ${text}
 16. 人设是最高优先级，千万记住
 17. 分成短段落（每段10字内），最多不超过10段
 18. 语气真诚，像真人在聊天一样
-19. 人设是最高优先级，真的很重要
-20. 人设是最高优先级，一定要记住！`
+19. 回复要完整！不要说半截话，每一段都要是完整的意思，不要让人感觉后面还要说话
+20. 回复要有结尾感！不要用问句或悬念结尾，每轮对话都要有明确的结束感，让对方知道你说完了
+21. 人设是最高优先级，真的很重要
+22. 人设是最高优先级，一定要记住！`
 
     console.log('[多用户微信机器人] 调用AI中...')
     const aiResponse = await callAI(prompt)
     console.log('[多用户微信机器人] AI回复:', aiResponse)
     
     if (aiResponse && aiResponse.trim()) {
-      addChatLog(userId, 'assistant', aiResponse.trim())
+      const finalResponse = aiResponse.trim()
+      
+      addChatLog(userId, 'assistant', finalResponse)
+      
+      const memoryTitle = generateSimpleTitle(text, finalResponse)
+      saveMemoryItem(userId, {
+        title: memoryTitle,
+        importance: 'normal',
+        type: 'chat',
+        content: `${text}\n---\n${finalResponse}`,
+        userText: text,
+        assistantText: finalResponse
+      })
+      
       console.log('[多用户微信机器人] 准备发送微信消息...')
       await sendToWeixin({
         userId,
         toUser: fromUser,
-        text: aiResponse.trim(),
+        text: finalResponse,
         contextToken,
         config: account
       })
@@ -792,6 +935,8 @@ export class AI_MultiUser_Bot extends plugin {
       rule: [
         { reg: '^#登录微信AI$', fnc: 'loginWeixin' },
         { reg: '^#更改人设', fnc: 'changePersona' },
+        { reg: '^#清除记忆$', fnc: 'clearMemoryCmd' },
+        { reg: '^#我的信息$', fnc: 'showMyInfo' },
         { reg: '^#微信机器人在线列表$', fnc: 'listOnlineBots' },
         { reg: '^#停止机器人(.*)$', fnc: 'stopBot' },
         { reg: '^#启动机器人(.*)$', fnc: 'startBot' },
@@ -914,6 +1059,84 @@ export class AI_MultiUser_Bot extends plugin {
     return true
   }
 
+  async clearMemoryCmd() {
+    const userId = this.e.user_id
+    const account = loadAccount(userId)
+    
+    if (!account || !account.token) {
+      await this.reply('未找到账号或未登录，请先发送 #登录微信AI 登录')
+      return true
+    }
+    
+    clearMemory(userId)
+    
+    await this.reply('聊天记忆已清除')
+    return true
+  }
+
+  async showMyInfo() {
+    const userId = this.e.user_id
+    const account = loadAccount(userId)
+    
+    if (!account || !account.token) {
+      await this.reply('未找到账号或未登录，请先发送 #登录微信AI 登录')
+      return true
+    }
+    
+    const now = Date.now()
+    
+    const chatMem = loadMemory(userId)
+    let totalMsgs = chatMem.length
+    let userMsgs = 0
+    let assistantMsgs = 0
+    for (const msg of chatMem) {
+      if (msg.role === 'user') userMsgs++
+      else if (msg.role === 'assistant') assistantMsgs++
+    }
+    
+    const memoriesDir = getMemoriesDir(userId)
+    let memoryCount = 0
+    if (fs.existsSync(memoriesDir)) {
+      memoryCount = fs.readdirSync(memoriesDir).filter(f => f.endsWith('.json')).length
+    }
+    
+    const createdAt = account.createdAt || now
+    const lastActiveAt = account.lastActiveAt || createdAt
+    
+    const daysSinceCreation = Math.floor((now - createdAt) / (1000 * 60 * 60 * 24))
+    const daysSinceLastActive = Math.floor((now - lastActiveAt) / (1000 * 60 * 60 * 24))
+    
+    let infoText = '📊 我的信息\n'
+    infoText += '────────────────\n'
+    infoText += `QQ号：${userId}\n`
+    if (account.age) {
+      infoText += `年龄：${account.age}\n`
+    }
+    infoText += '────────────────\n'
+    infoText += `💬 对话统计\n`
+    infoText += `总消息数：${totalMsgs} 条\n`
+    infoText += `你发送：${userMsgs} 条\n`
+    infoText += `我回复：${assistantMsgs} 条\n`
+    infoText += '────────────────\n'
+    infoText += `⏰ 时间统计\n`
+    infoText += `认识天数：${daysSinceCreation} 天\n`
+    infoText += `距上次在线：${daysSinceLastActive} 天\n`
+    infoText += '────────────────\n'
+    infoText += `🧠 记忆文件：${memoryCount} 个\n`
+    
+    saveMemoryItem(userId, {
+      title: '查看个人信息',
+      importance: 'normal',
+      type: 'info',
+      content: `用户查看了自己的个人信息，当前共有${totalMsgs}条对话，${memoryCount}个记忆文件`,
+      userText: '#我的信息',
+      assistantText: infoText
+    })
+    
+    await this.reply(infoText)
+    return true
+  }
+
   async changePersona() {
     const userId = this.e.user_id
     const account = loadAccount(userId)
@@ -998,7 +1221,7 @@ export class AI_MultiUser_Bot extends plugin {
   
   async showHelp() {
     await this.reply(
-      `多用户微信机器人帮助:\n\n#登录微信AI - 获取二维码登录微信\n#更改人设 人设内容 - 修改自己的人设（需已登录并运行）\n  （支持多行、任意长度的人设内容）\n#微信机器人在线列表 - 查看所有账号状态\n#停止机器人 [用户ID] - 停止指定账号\n#启动机器人 [用户ID] - 启动指定账号\n#删除机器人 [用户ID] - 删除账号\n\n普通用户: #登录微信AI 登录自己的微信\n主人: 可以管理所有账号`
+      `多用户微信机器人帮助:\n\n#登录微信AI - 获取二维码登录微信\n#更改人设 人设内容 - 修改自己的人设（需已登录并运行）\n  （支持多行、任意长度的人设内容）\n#清除记忆 - 清除自己的聊天记忆（需已登录）\n#我的信息 - 查看个人信息和统计数据（需已登录）\n#微信机器人在线列表 - 查看所有账号状态\n#停止机器人 [用户ID] - 停止指定账号\n#启动机器人 [用户ID] - 启动指定账号\n#删除机器人 [用户ID] - 删除账号\n\n普通用户: #登录微信AI 登录自己的微信\n主人: 可以管理所有账号`
     )
     return true
   }

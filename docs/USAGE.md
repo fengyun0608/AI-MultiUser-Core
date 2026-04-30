@@ -19,7 +19,7 @@
 
 - **项目路径**: core/AI-MultiUser-Core
 - **项目名称**: AI-MultiUser-Core
-- **版本**: 11.0.0
+- **版本**: 12.1.0
 - **开源协议**: MIT License
 - **依赖项目**: [XRK-AGT](https://github.com/sunflowermm/XRK-AGT)
 
@@ -196,6 +196,21 @@
 - 可随时修改，立即生效
 - 如果清空人设，会使用默认人设
 - 人设文件保存在 `accounts/user-XXX/persona.md`
+
+### #清除记忆 命令说明
+
+#### 使用前提
+- 已通过 `#登录微信AI` 登录微信
+
+#### 使用格式
+```
+#清除记忆
+```
+
+#### 功能说明
+- 清空当前用户的所有聊天记忆
+- AI将忘记之前的对话内容，重新开始
+- 记忆文件保存在 `accounts/user-XXX/chat-memory.json`
 
 ---
 
