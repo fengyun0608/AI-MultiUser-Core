@@ -308,52 +308,14 @@ async function pollQRCodeLoop(sessionKey) {
           continue
           
         case 'expired':
-          qrRefreshCount++
-          if (qrRefreshCount > MAX_QR_REFRESH_COUNT) {
-            console.log('[多用户微信机器人] 二维码刷新次数过多')
-            try {
-              if (login.pluginInstance) {
-                await login.pluginInstance.reply('二维码过期次数过多，请重新发送 #登录微信AI')
-              }
-            } catch (e) {}
-            activeLogins.delete(sessionKey)
-            break
-          }
-          
-          console.log('[多用户微信机器人] 二维码过期，刷新中...')
-          const newQrResponse = await fetchQRCode(FIXED_BASE_URL, DEFAULT_ILINK_BOT_TYPE)
-          login.qrcode = newQrResponse.qrcode
-          login.qrcodeUrl = newQrResponse.qrcode_img_content
-          login.startedAt = Date.now()
-          console.log('[多用户微信机器人] 二维码已刷新')
-          
+          console.log('[多用户微信机器人] 二维码已过期')
           try {
             if (login.pluginInstance) {
-              try {
-                const filename = `qrcode_${sessionKey}_${Date.now()}.png`
-                const filepath = path.join(TEMP_DIR, filename)
-                
-                await login.pluginInstance.reply('二维码已过期，新二维码已生成：')
-                
-                try {
-                  await screenshotUrl(newQrResponse.qrcode_img_content, filepath)
-                  await login.pluginInstance.reply(segment.image(filepath))
-                } catch (e) {
-                  await login.pluginInstance.reply(newQrResponse.qrcode_img_content)
-                }
-                
-                setTimeout(() => { try { fs.unlinkSync(filepath) } catch (e) { } }, 120000)
-              } catch (e) {
-                console.error('[多用户微信机器人] 刷新二维码失败', e)
-                await login.pluginInstance.reply([
-                  '二维码已过期，新二维码已生成：',
-                  '',
-                  newQrResponse.qrcode_img_content
-                ].join('\n'))
-              }
+              await login.pluginInstance.reply('二维码已过期，请重新发送 #登录微信AI')
             }
-          } catch (e) { }
-          continue
+          } catch (e) {}
+          activeLogins.delete(sessionKey)
+          break
           
         case 'confirmed':
           if (!statusResponse.ilink_bot_id) {
