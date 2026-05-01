@@ -884,6 +884,12 @@ async function callAI(prompt, userId) {
         addRateLimit(userId)
         console.log(`[多用户微信机器人] API ${api.url} 调用成功`)
         return result
+      } else {
+        const errorText = await response.text()
+        console.warn(`[多用户微信机器人] API ${api.url} 失败: ${response.status}`, errorText)
+        // 标记这个API失败
+        apiHealth.set(api.url, { ok: false, lastCheck: Date.now() })
+      }
     } catch (e) {
       console.warn(`[多用户微信机器人] API ${api.url} 异常:`, e.message)
       // 标记这个API失败
