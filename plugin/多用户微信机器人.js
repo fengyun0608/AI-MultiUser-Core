@@ -699,6 +699,58 @@ function getChatHistoryString(userId) {
 
 let cachedConfig = null
 
+// 记录每个API的健康状态和最后检查时间
+const apiHealth = new Map() // key: api url, value: { ok: boolean, lastCheck: number }
+const API_CHECK_INTERVAL = 60000 // 1分钟检查一次
+
+async function checkApiHealth(api) {
+  const now = Date.now()
+  const cached = apiHealth.get(api.url)
+  
+  // 如果最近检查过，直接返回缓存
+  if (cached && (now - cached.lastCheck) < API_CHECK_INTERVAL) {
+    return cached.ok
+  }
+  
+  // 快速检查：发送一个简单请求（max_tokens=1）
+  try {
+    const response = await fetch(api.url, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'Authorization': `Bearer ${api.key}`
+      },
+      body: JSON.stringify({
+        model: api.model,
+        messages: [{ role: 'user', content: 'hi' }],
+        max_tokens: 1,
+        temperature: 0
+      }),
+      signal: AbortSignal.timeout(10000) // 10秒超时
+    })
+    
+    const ok = response.ok
+    apiHealth.set(api.url, { ok, lastCheck: now })
+    console.log(`[多用户微信机器人] API ${api.url} 健康检查: ${ok ? '✅' : '❌'}`)
+    return ok
+  } catch (e) {
+    apiHealth.set(api.url, { ok: false, lastCheck: now })
+    console.log(`[多用户微信机器人] API ${api.url} 健康检查: ❌ (${e.message})`)
+    return false
+  }
+}
+
+async function getAvailableApis(config) {
+  const available = []
+  for (const api of config.apis) {
+    const ok = await checkApiHealth(api)
+    if (ok) {
+      available.push(api)
+    }
+  }
+  return available
+}
+
 function loadPluginConfig() {
   if (cachedConfig) return cachedConfig
   try {
@@ -725,12 +777,21 @@ async function callAI(prompt, userId) {
     return null
   }
 
-  // 尝试所有API，直到成功
-  for (let i = 0; i < config.apis.length; i++) {
-    const apiIndex = (currentApiIndex + i) % config.apis.length
-    const api = config.apis[apiIndex]
+  // 获取可用的API
+  const availableApis = await getAvailableApis(config)
+  if (availableApis.length === 0) {
+    console.error('[多用户微信机器人] 没有可用的API')
+    return null
+  }
+  console.log(`[多用户微信机器人] 可用API数量: ${availableApis.length}/${config.apis.length}`)
+
+  // 只在可用的API中轮询
+  const originalIndex = currentApiIndex % availableApis.length
+  for (let i = 0; i < availableApis.length; i++) {
+    const apiIndex = (originalIndex + i) % availableApis.length
+    const api = availableApis[apiIndex]
     
-    console.log(`[多用户微信机器人] 尝试API: ${apiIndex}`)
+    console.log(`[多用户微信机器人] 尝试API: ${api.url}`)
     
     try {
       const response = await fetch(api.url, {
@@ -758,21 +819,23 @@ async function callAI(prompt, userId) {
         
         if (result) {
           // 成功了，更新索引，记录限流
-          currentApiIndex = apiIndex + 1
+          // 找到这个API在原始列表中的索引
+          const originalApiIndex = config.apis.findIndex(a => a.url === api.url)
+          currentApiIndex = originalApiIndex + 1
           addRateLimit(userId)
-          console.log(`[多用户微信机器人] API ${apiIndex} 调用成功`)
+          console.log(`[多用户微信机器人] API ${api.url} 调用成功`)
           return result
         }
       } else {
         const errorText = await response.text()
-        console.warn(`[多用户微信机器人] API ${apiIndex} 失败: ${response.status}`, errorText)
+        console.warn(`[多用户微信机器人] API ${api.url} 失败: ${response.status}`, errorText)
       }
     } catch (e) {
-      console.warn(`[多用户微信机器人] API ${apiIndex} 异常:`, e.message)
+      console.warn(`[多用户微信机器人] API ${api.url} 异常:`, e.message)
     }
   }
   
-  // 所有API都失败了
+  // 所有可用API都失败了
   console.error('[多用户微信机器人] 所有API调用失败')
   return null
 }
@@ -1176,6 +1239,7 @@ export class AI_MultiUser_Bot extends plugin {
         { reg: '^[#＃]当前人设$', fnc: 'showCurrentPersona' },
         { reg: '^[#＃]清除记忆$', fnc: 'clearMemoryCmd' },
         { reg: '^[#＃]我的信息$', fnc: 'showMyInfo' },
+        { reg: '^[#＃]站点状态$', fnc: 'showApiStatus' },
         { reg: '^[#＃]微信机器人在线列表$', fnc: 'listOnlineBots' },
         { reg: '^[#＃]在线用户$', fnc: 'showOnlineUsers' },
         { reg: '^[#＃]停止机器人(.*)$', fnc: 'stopBot' },
@@ -1269,6 +1333,55 @@ export class AI_MultiUser_Bot extends plugin {
       await this.reply(replyText2)
     }
     
+    return true
+  }
+  
+  async showApiStatus() {
+    const config = loadPluginConfig()
+    if (!config || !config.apis) {
+      await this.reply('未找到配置')
+      return true
+    }
+    
+    await this.reply('正在检查站点状态，请稍候...')
+    
+    // 检查每个API
+    const statusList = []
+    for (let i = 0; i < config.apis.length; i++) {
+      const api = config.apis[i]
+      const ok = await checkApiHealth(api)
+      statusList.push({
+        index: i + 1,
+        url: api.url,
+        model: api.model,
+        ok
+      })
+    }
+    
+    // 分类
+    const online = statusList.filter(s => s.ok)
+    const offline = statusList.filter(s => !s.ok)
+    
+    // 构建回复
+    let reply = '📍 站点状态\n\n'
+    
+    reply += `🟢 在线站点 (${online.length}个):\n`
+    for (const s of online) {
+      reply += `  ${s.index}号: ${s.model}\n`
+    }
+    
+    reply += `\n🔴 离线站点 (${offline.length}个):\n`
+    for (const s of offline) {
+      reply += `  ${s.index}号: ${s.model}\n`
+    }
+    
+    reply += '\n📄 详细信息:\n'
+    for (const s of statusList) {
+      const status = s.ok ? '🟢 在线' : '🔴 离线'
+      reply += `${s.index}号: ${status} | 模型: ${s.model}\n`
+    }
+    
+    await this.reply(reply)
     return true
   }
   
