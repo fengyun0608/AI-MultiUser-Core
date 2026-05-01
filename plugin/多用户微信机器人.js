@@ -748,7 +748,7 @@ async function checkApiHealth(api) {
         max_tokens: 1,
         temperature: 0
       }),
-      signal: AbortSignal.timeout(10000) // 10秒超时
+      signal: AbortSignal.timeout(3000) // 3秒超时
     })
     
     const ok = response.ok
@@ -813,12 +813,21 @@ async function callAI(prompt, userId) {
     apisToUse = config.apis
   }
 
-  // 获取可用的API
+  // 获取可用的API（优先用缓存，没有再检查）
   const availableApis = []
+  const now = Date.now()
   for (const api of apisToUse) {
-    const ok = await checkApiHealth(api)
-    if (ok) {
-      availableApis.push(api)
+    const cached = apiHealth.get(api.url)
+    if (cached && (now - cached.lastCheck) < API_CHECK_INTERVAL) {
+      if (cached.ok) {
+        availableApis.push(api)
+      }
+    } else {
+      // 没有缓存或过期，快速检查
+      const ok = await checkApiHealth(api)
+      if (ok) {
+        availableApis.push(api)
+      }
     }
   }
   
@@ -853,7 +862,8 @@ async function callAI(prompt, userId) {
           ],
           temperature: 0.7,
           max_tokens: 1000
-        })
+        }),
+        signal: AbortSignal.timeout(15000) // 15秒超时
       })
 
       if (response.ok) {
@@ -871,9 +881,13 @@ async function callAI(prompt, userId) {
       } else {
         const errorText = await response.text()
         console.warn(`[多用户微信机器人] API ${api.url} 失败: ${response.status}`, errorText)
+        // 标记这个API失败
+        apiHealth.set(api.url, { ok: false, lastCheck: Date.now() })
       }
     } catch (e) {
       console.warn(`[多用户微信机器人] API ${api.url} 异常:`, e.message)
+      // 标记这个API失败
+      apiHealth.set(api.url, { ok: false, lastCheck: Date.now() })
     }
   }
   
@@ -1147,9 +1161,23 @@ async function processSystemCommand(userId, account, fromUser, contextToken, com
       return
     }
     
-    const url = parts[0].trim()
+    let url = parts[0].trim()
     const key = parts[1].trim()
     const model = parts[2].trim()
+    
+    // 自动补全URL
+    if (url.startsWith('http') && !url.includes('/chat/completions')) {
+      if (url.endsWith('/v1')) {
+        url = url + '/chat/completions'
+      } else if (url.endsWith('/v1/')) {
+        url = url + 'chat/completions'
+      } else if (url.endsWith('/')) {
+        url = url + 'v1/chat/completions'
+      } else {
+        url = url + '/v1/chat/completions'
+      }
+      console.log(`[多用户微信机器人] 自动补全URL为: ${url}`)
+    }
     
     // 保存配置
     let currentConfig = loadUserApiConfig(userId) || { enabled: false, apis: [] }
@@ -1259,7 +1287,9 @@ ${mergedText}
 10. 别一直重复旧话题
 11. 回复要有结尾，别说半截话
 12. 如果有人说你是AI，按人设反应（傲娇就怼，温柔就解释）
-13. 重要对话：用户说名字、地址、重要约定、重要事情才是重要，普通闲聊不重要`
+13. 重要对话：用户说名字、地址、重要约定、重要事情才是重要，普通闲聊不重要
+14. 别主动说换话题，别主动邀请聊别的话题
+15. 只回应当前用户说的话，别主动提别的`
   
   console.log('[多用户微信机器人] 调用AI中...')
   const aiResponse = await callAI(prompt, userId)
