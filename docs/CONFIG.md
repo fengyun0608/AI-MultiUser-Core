@@ -18,7 +18,7 @@
 
 - **项目路径**: core/AI-MultiUser-Core
 - **项目名称**: AI-MultiUser-Core
-- **版本**: 12.1.0
+- **版本**: 13.0.0
 - **开源协议**: MIT License
 - **依赖项目**: [XRK-AGT](https://github.com/sunflowermm/XRK-AGT)
 

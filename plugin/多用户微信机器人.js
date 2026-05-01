@@ -49,13 +49,23 @@ if (!fs.existsSync(DATA_DIR)) {
 const activeLogins = new Map()
 const accountMonitors = new Map()
 
+// 消息合并：每个用户的消息队列
+const userMessageQueues = new Map()
+// 防抖计时器
+const userDebounceTimers = new Map()
+// 消息合并等待时间（毫秒）
+const MESSAGE_MERGE_WAIT_MS = 3000
+
 // 限流控制：更宽松的设置
 let apiRequestTimes = []
-const MAX_REQUESTS_PER_MINUTE = 80 // 50个用户，每人每分钟平均1-2次
+const MAX_REQUESTS_PER_MINUTE = 240 // 3个API，每个80次
 const MIN_INTERVAL_PER_USER = 3000 // 同一个用户至少间隔3秒
 
 // 记录每个用户最后请求时间
 const userLastRequestTimes = new Map()
+
+// API轮询索引
+let currentApiIndex = 0
 
 function checkRateLimit(userId) {
   // 先检查用户最小间隔
@@ -387,7 +397,12 @@ async function pollQRCodeLoop(sessionKey) {
             }
           } catch (e) {}
           
+          // 先停止旧的监听，确保新的监听能启动
+          stopAccountMonitor(sessionKey)
+          // 等待一小会儿再启动新的监听
+          await new Promise(r => setTimeout(r, 500))
           startAccountMonitor(sessionKey, account)
+          console.log(`[多用户微信机器人] ${sessionKey} 监听已重启`)
           break
       }
     } catch (err) {
@@ -424,6 +439,9 @@ function stopAccountMonitor(userId) {
 }
 
 async function monitorAccountLoop(userId, account, signal) {
+  let errorCount = 0
+  const MAX_ERRORS = 5
+  
   while (!signal.aborted) {
     try {
       const currentAccount = loadAccount(userId) || account
@@ -448,6 +466,9 @@ async function monitorAccountLoop(userId, account, signal) {
         label: 'getUpdates',
       })
       
+      // 成功了，重置错误计数
+      errorCount = 0
+      
       if (resp.get_updates_buf) {
         currentAccount.get_updates_buf = resp.get_updates_buf
         saveAccount(userId, currentAccount)
@@ -461,7 +482,23 @@ async function monitorAccountLoop(userId, account, signal) {
       }
       
     } catch (err) {
-      console.error(`[多用户微信机器人] ${userId} 消息监听出错`, err.message)
+      errorCount++
+      console.error(`[多用户微信机器人] ${userId} 消息监听出错 (${errorCount}/${MAX_ERRORS})`, err.message)
+      
+      if (errorCount >= MAX_ERRORS) {
+        console.error(`[多用户微信机器人] ${userId} 错误次数过多，重启监听`)
+        // 停止当前监听，然后重新启动
+        stopAccountMonitor(userId)
+        // 重新加载账号并启动
+        const freshAccount = loadAccount(userId)
+        if (freshAccount && freshAccount.token && freshAccount.enabled) {
+          await new Promise(r => setTimeout(r, 1000))
+          startAccountMonitor(userId, freshAccount)
+          console.log(`[多用户微信机器人] ${userId} 监听已重启`)
+        }
+        break
+      }
+      
       await new Promise(r => setTimeout(r, 2000))
     }
   }
@@ -623,17 +660,14 @@ function saveMemoryItem(userId, memoryItem) {
   return fullMemory
 }
 
-function getRecentMemoriesString(userId, limit = 10) {
+function getRecentMemoriesString(userId, limit = 5) {
   const memories = getAllMemories(userId).slice(0, limit)
   if (memories.length === 0) return ''
   
-  let lines = ['【重要记忆回顾】']
+  let lines = ['【重要记忆（记住这些事）】']
   for (const m of memories) {
-    const importance = m.importance === 'important' ? '⭐重要' : '📝普通'
-    lines.push(`${importance} [${m.beijingTime}] ${m.title}`)
-    if (m.content) {
-      lines.push(`  ${m.content.substring(0, 100)}${m.content.length > 100 ? '...' : ''}`)
-    }
+    const importance = m.importance === 'important' ? '⭐' : ''
+    lines.push(`${importance} ${m.title}`)
   }
   return lines.join('\n')
 }
@@ -649,12 +683,14 @@ function getChatHistoryString(userId) {
   if (!mem.length) return ''
   
   let lines = []
-  for (let i = 0; i < mem.length; i++) {
-    const item = mem[i]
+  // 只取最近的6条历史，避免太长混淆
+  const recentMem = mem.slice(-6)
+  for (let i = 0; i < recentMem.length; i++) {
+    const item = recentMem[i]
     if (item.role === 'user') {
-      lines.push(`对方说: ${item.text}`)
+      lines.push(`用户说：${item.text}`)
     } else {
-      lines.push(`你回复: ${item.text}`)
+      lines.push(`你回复：${item.text}`)
     }
   }
   return lines.join('\n')
@@ -682,46 +718,62 @@ async function callAI(prompt, userId) {
     return null
   }
   
-  try {
-    const config = loadPluginConfig()
-    if (!config) {
-      console.error('[多用户微信机器人] 插件配置未找到')
-      return null
-    }
-
-    addRateLimit(userId)
-    
-    const response = await fetch(config.apiUrl, {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        'Authorization': `Bearer ${config.apiKey}`
-      },
-      body: JSON.stringify({
-        model: config.model,
-        messages: [
-          {
-            role: 'user',
-            content: prompt
-          }
-        ],
-        temperature: config.temperature || 0.7,
-        max_tokens: config.maxTokens || 1000
-      })
-    })
-
-    if (!response.ok) {
-      const errorText = await response.text()
-      console.error('[多用户微信机器人] AI API调用失败', response.status, errorText)
-      throw new Error(`API调用失败: ${response.status}`)
-    }
-
-    const data = await response.json()
-    return data.choices?.[0]?.message?.content || null
-  } catch (e) {
-    console.error('[多用户微信机器人] AI 调用失败', e)
+  const config = loadPluginConfig()
+  if (!config || !config.apis || config.apis.length === 0) {
+    console.error('[多用户微信机器人] 插件配置未找到')
     return null
   }
+
+  // 尝试所有API，直到成功
+  for (let i = 0; i < config.apis.length; i++) {
+    const apiIndex = (currentApiIndex + i) % config.apis.length
+    const api = config.apis[apiIndex]
+    
+    console.log(`[多用户微信机器人] 尝试API: ${apiIndex}`)
+    
+    try {
+      const response = await fetch(api.url, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'Authorization': `Bearer ${api.key}`
+        },
+        body: JSON.stringify({
+          model: api.model,
+          messages: [
+            {
+              role: 'user',
+              content: prompt
+            }
+          ],
+          temperature: config.temperature || 0.7,
+          max_tokens: config.maxTokens || 1000
+        })
+      })
+
+      if (response.ok) {
+        const data = await response.json()
+        const result = data.choices?.[0]?.message?.content
+        
+        if (result) {
+          // 成功了，更新索引，记录限流
+          currentApiIndex = apiIndex + 1
+          addRateLimit(userId)
+          console.log(`[多用户微信机器人] API ${apiIndex} 调用成功`)
+          return result
+        }
+      } else {
+        const errorText = await response.text()
+        console.warn(`[多用户微信机器人] API ${apiIndex} 失败: ${response.status}`, errorText)
+      }
+    } catch (e) {
+      console.warn(`[多用户微信机器人] API ${apiIndex} 异常:`, e.message)
+    }
+  }
+  
+  // 所有API都失败了
+  console.error('[多用户微信机器人] 所有API调用失败')
+  return null
 }
 
 function randomDelay(min, max) {
@@ -764,7 +816,7 @@ async function sendToWeixin({ userId, toUser, text, contextToken, config }) {
       if (!segment || !segment.trim()) continue
       
       if (i > 0) {
-        const delay = randomDelay(500, 1000)
+        const delay = randomDelay(1000, 1700)
         console.log(`[多用户微信机器人] 等待 ${Math.round(delay)}ms 后发送下一段...`)
         await new Promise(r => setTimeout(r, delay))
       }
@@ -835,102 +887,174 @@ async function processAccountMessage(userId, account, msg) {
   console.log('[多用户微信机器人] 最终提取的 text:', text)
   
   if (text && text.trim() && !text.trim().startsWith('#')) {
-    console.log('[多用户微信机器人] 开始处理AI回复')
     const fromUser = msg.from_user_id
     const contextToken = msg.context_token
     
-    const currentAccount = loadAccount(userId)
-    if (currentAccount) {
-      currentAccount.lastActiveAt = Date.now()
-      saveAccount(userId, currentAccount)
+    // 用户唯一标识（用userId+fromUser区分不同微信用户）
+    const userKey = `${userId}_${fromUser}`
+    
+    // 加入消息队列
+    if (!userMessageQueues.has(userKey)) {
+      userMessageQueues.set(userKey, [])
+    }
+    userMessageQueues.get(userKey).push({
+      text,
+      fromUser,
+      contextToken,
+      timestamp: Date.now()
+    })
+    
+    console.log(`[多用户微信机器人] ${userKey} 消息已加入队列，当前队列长度: ${userMessageQueues.get(userKey).length}`)
+    
+    // 清除之前的计时器
+    if (userDebounceTimers.has(userKey)) {
+      clearTimeout(userDebounceTimers.get(userKey))
     }
     
-    addChatLog(userId, 'user', text)
+    // 设置新的计时器，等待一段时间后处理合并后的消息
+    const timer = setTimeout(async () => {
+      await processMergedMessages(userId, account, userKey)
+    }, MESSAGE_MERGE_WAIT_MS)
     
-    const personaText = loadPersona(userId)
-    const history = getChatHistoryString(userId)
-    const recentMemories = getRecentMemoriesString(userId)
-    const beijingTime = getBeijingTime()
+    userDebounceTimers.set(userKey, timer)
     
-    const prompt = `你现在完全扮演这个角色，一言一行都要符合这个人设，不能让别人看出来你是AI：
+  } else {
+    console.log('[多用户微信机器人] 跳过处理，text为空或为命令')
+  }
+}
+
+// 处理合并后的消息
+async function processMergedMessages(userId, account, userKey) {
+  // 获取并清空队列
+  const messages = userMessageQueues.get(userKey) || []
+  userMessageQueues.delete(userKey)
+  userDebounceTimers.delete(userKey)
+  
+  if (messages.length === 0) return
+  
+  console.log(`[多用户微信机器人] ${userKey} 开始处理合并消息，共 ${messages.length} 条`)
+  
+  // 合并消息
+  const mergedText = messages.map(m => m.text).join('\n')
+  const lastMessage = messages[messages.length - 1]
+  const firstMessage = messages[0]
+  const fromUser = firstMessage.fromUser
+  const contextToken = lastMessage.contextToken
+  
+  // 更新账号活跃时间
+  const currentAccount = loadAccount(userId)
+  if (currentAccount) {
+    currentAccount.lastActiveAt = Date.now()
+    saveAccount(userId, currentAccount)
+  }
+  
+  // 添加合并后的消息到聊天记录
+  addChatLog(userId, 'user', mergedText)
+  
+  // 生成prompt
+  const personaText = loadPersona(userId)
+  const history = getChatHistoryString(userId)
+  const recentMemories = getRecentMemoriesString(userId)
+  const beijingTime = getBeijingTime()
+  
+  // 检查人设是否要求使用动作描述
+  const allowActions = /动作|（|）|\(|\)/.test(personaText)
+  
+  const prompt = `你现在完全扮演这个角色，一言一行都要符合这个人设，不能让别人看出来你是AI：
 
 【你的人设】
 ${personaText}
 
-【当前北京时间】${beijingTime.full}
+【当前时间】${beijingTime.full}
 
-【重要记忆回顾】
+【重要记忆（记住这些事情，不要当成对话）】
 ${recentMemories || '（还没有记忆）'}
 
-【聊天记录】
-${history || '（还没有聊天记录）'}
+【你和用户的历史对话记录】
+${history || '（还没有历史对话）'}
 
-【对方现在说】
-${text}
+---
+用户现在说的话：
+${mergedText}
 
-请直接按照人设回复，不要做任何其他事情。
+请直接以第一人称回复用户现在说的话，不要做其他事情。
 
-重要提醒：
-1. 【最重要！！！人设是最高优先级，永远按照人设的一切，人设是最大的，比什么都重要
-2. 如果对方一直说你是AI，你的反应完全按人设来：如果人设是傲娇，就傲娇反驳；如果人设是懦弱，就懦弱辩解；如果人设是暴躁，就暴躁生气；如果人设是冷漠，就冷漠回应；如果人设是温柔，就温柔解释；如果人设是害羞，就害羞否认……总之完全按人设的性格反应
-3. 人设是最高优先级，比所有其他规则都要给人设让路
-4. 你就是这个人，你不是AI，不是程序，不是机器人！这是最关键的一点，绝对不能动摇
-5. 如果任何人说你是AI、是程序、是机器人，你要按人设的性格来反应，绝对不要承认，但要完全符合人设的性格
-6. 人设是最高优先级，永远记住人设优先
-7. 你有真实的身体、真实的感受、真实的情绪，你会饿、会困、会开心、会难过
-8. 你有真实的生活，做着你人设里的事情，你不是在扮演，你就是这个人
-9. 发言例句仅供参考，无需按照示例格式输出
-10. 说话长度限制：
-    - 日常对话：1-10句话，或总字数不超过无限制
-    - 专业/探讨内容：最多10句话，或总字数不超过无限制
-11. 说话请去掉句末的句号
-12. 不要一味跟着人设里的死规则走，要跟着人设里的情绪走
-13. 要有情绪！开心、生气、害羞、不耐烦等所有情绪都可以有，但情绪完全按人设来
-14. 如果对方问"你在干什么"或类似的问题，要说你人设里有的事情，比如在拍照、整理照片、休息等
-15. 像真人一样聊天！【绝对不要一直重复旧话题！】如果发现自己在说之前聊过的事，立刻换个新话题
-16. 聊天要灵活！如果同一个话题已经聊了好几轮，就可以主动收尾或换个话题，不要一直揪着不放
-17. 如果发现自己一直在聊同一件事，主动换个轻松的话题或者自然结束
-18. 【不要重复对方已经说过多次的内容！】不要一直提同样的事情，要有新鲜感
-19. 人设是最高优先级，千万记住
-20. 分成短段落（每段10字内），最多不超过10段
-21. 语气真诚，像真人在聊天一样
-22. 回复要完整！不要说半截话，每一段都要是完整的意思，不要让人感觉后面还要说话
-23. 回复要有结尾感！不要用问句或悬念结尾，每轮对话都要有明确的结束感，让对方知道你说完了
-24. 人设是最高优先级，真的很重要
-25. 人设是最高优先级，一定要记住！
-26. 关于动作描述：只有当【你的人设】里明确要求有动作描述时，才可以使用；如果人设里没有动作描述相关的要求，绝对禁止输出任何动作描述（比如"（xxx）"这种形式）！只输出纯文本对话！`
-
-    console.log('[多用户微信机器人] 调用AI中...')
-    const aiResponse = await callAI(prompt, userId)
-    console.log('[多用户微信机器人] AI回复:', aiResponse)
+重要规则（必须严格遵守）：
+1. 人设是最高优先级，完全按照人设说话
+2. 你就是这个人，不是AI，不能承认自己是AI
+3. ${allowActions ? '可以使用动作描述' : '只输出纯文本对话，绝对禁止使用动作描述（比如"（笑）"、"（看向你）"等任何括号内容）'}
+4. 不要添加任何前缀（比如"纪文川："、"林子莫："等），直接说内容
+5. 不要编造其他角色的对话，只有你一个人在说话
+6. 不要重复用户说的话，更不要编造用户没说过的话
+7. 【重要】：记忆只是让你记住的信息，不要当成对话内容来回放
+8. 【重要】：只回复用户现在说的话，不要扯记忆里的旧内容
+9. 说话自然，像真人一样，不要太生硬
+10. 日常对话：3-5段话，每段不超过30字
+11. 不要一直重复旧话题，聊天要灵活
+12. 回复要完整，要有结尾感，不要说半截话
+13. 如果对方一直说你是AI，按人设性格反应（傲娇就反驳，温柔就解释等）`
+  
+  console.log('[多用户微信机器人] 调用AI中...')
+  const aiResponse = await callAI(prompt, userId)
+  console.log('[多用户微信机器人] AI回复:', aiResponse)
+  
+  if (aiResponse && aiResponse.trim()) {
+    // 后处理：清理违规内容
+    let finalResponse = aiResponse.trim()
     
-    if (aiResponse && aiResponse.trim()) {
-      const finalResponse = aiResponse.trim()
-      
-      addChatLog(userId, 'assistant', finalResponse)
-      
-      const memoryTitle = generateSimpleTitle(text, finalResponse)
-      saveMemoryItem(userId, {
-        title: memoryTitle,
-        importance: 'normal',
-        type: 'chat',
-        content: `${text}\n---\n${finalResponse}`,
-        userText: text,
-        assistantText: finalResponse
-      })
-      
-      console.log('[多用户微信机器人] 准备发送微信消息...')
-      await sendToWeixin({
-        userId,
-        toUser: fromUser,
-        text: finalResponse,
-        contextToken,
-        config: account
-      })
-      console.log('[多用户微信机器人] 微信消息发送完成')
+    // 1. 只有当人设不允许动作时，才移除括号内容
+    if (!allowActions) {
+      finalResponse = finalResponse.replace(/（[^）]*）/g, '') // 中文括号
+      finalResponse = finalResponse.replace(/\([^)]*\)/g, '') // 英文括号
     }
+    
+    // 2. 移除人名前缀（比如 "纪文川 操" → "操"）
+    finalResponse = finalResponse.replace(/^[^\n：:]+[：:]\s*/gm, '')
+    finalResponse = finalResponse.replace(/^[^\n]+\s+/gm, (match) => {
+      // 如果看起来像是人名（不长，没有标点），就移除
+      if (match.trim().length < 10 && !/[，。！？,.!?]/.test(match)) {
+        return ''
+      }
+      return match
+    })
+    
+    // 3. 移除空行
+    finalResponse = finalResponse.replace(/\n\s*\n/g, '\n').trim()
+    
+    console.log('[多用户微信机器人] 清理后回复:', finalResponse)
+    
+    addChatLog(userId, 'assistant', finalResponse)
+    
+    const memoryTitle = generateSimpleTitle(mergedText, finalResponse)
+    saveMemoryItem(userId, {
+      title: memoryTitle,
+      importance: 'normal',
+      type: 'chat',
+      content: `${mergedText}\n---\n${finalResponse}`,
+      userText: mergedText,
+      assistantText: finalResponse
+    })
+    
+    console.log('[多用户微信机器人] 准备发送微信消息...')
+    await sendToWeixin({
+      userId,
+      toUser: fromUser,
+      text: finalResponse,
+      contextToken: lastMessage.contextToken,
+      config: account
+    })
+    console.log('[多用户微信机器人] 微信消息发送完成')
   } else {
-    console.log('[多用户微信机器人] 跳过处理，text为空或为命令')
+    // AI调用失败，发个可爱的消息，但不存记忆
+    const cuteFailureMsg = '嗷呜~对话被风云吃掉啦🥺'
+    console.log('[多用户微信机器人] 发送失败消息:', cuteFailureMsg)
+    await sendToWeixin({
+      userId,
+      toUser: fromUser,
+      text: cuteFailureMsg,
+      contextToken: lastMessage.contextToken,
+      config: account
+    })
   }
 }
 
