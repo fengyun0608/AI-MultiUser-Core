@@ -723,7 +723,7 @@ let cachedConfig = null
 
 // 记录每个API的健康状态和最后检查时间
 const apiHealth = new Map() // key: api url, value: { ok: boolean, lastCheck: number }
-const API_CHECK_INTERVAL = 60000 // 1分钟检查一次
+const API_CHECK_INTERVAL = 120000 // 2分钟检查一次
 
 async function checkApiHealth(api) {
   const now = Date.now()
@@ -868,22 +868,22 @@ async function callAI(prompt, userId) {
 
       if (response.ok) {
         const data = await response.json()
-        const result = data.choices?.[0]?.message?.content
+        let result = data.choices?.[0]?.message?.content
         
-        if (result) {
-          // 成功了，更新索引，记录限流
-          const originalApiIndex = apisToUse.findIndex(a => a.url === api.url)
-          currentApiIndex = originalApiIndex + 1
-          addRateLimit(userId)
-          console.log(`[多用户微信机器人] API ${api.url} 调用成功`)
-          return result
+        // 严格检查：如果结果是 {}、[]、或空字符串，视为失败
+        if (!result || !result.trim() || result === '{}' || result === '[]') {
+          console.warn(`[多用户微信机器人] API ${api.url} 返回无效内容:`, data)
+          // 标记这个API失败
+          apiHealth.set(api.url, { ok: false, lastCheck: Date.now() })
+          continue
         }
-      } else {
-        const errorText = await response.text()
-        console.warn(`[多用户微信机器人] API ${api.url} 失败: ${response.status}`, errorText)
-        // 标记这个API失败
-        apiHealth.set(api.url, { ok: false, lastCheck: Date.now() })
-      }
+        
+        // 成功了，更新索引，记录限流
+        const originalApiIndex = apisToUse.findIndex(a => a.url === api.url)
+        currentApiIndex = originalApiIndex + 1
+        addRateLimit(userId)
+        console.log(`[多用户微信机器人] API ${api.url} 调用成功`)
+        return result
     } catch (e) {
       console.warn(`[多用户微信机器人] API ${api.url} 异常:`, e.message)
       // 标记这个API失败
@@ -922,17 +922,30 @@ function splitTextToSegments(text) {
     }
   }
   
-  return segments.slice(0, 10).length > 0 ? segments.slice(0, 10) : [text.trim()]
+  // 确保至少有一段
+  if (segments.length === 0) {
+    // 如果处理后没有内容，把原文本trim后放进去
+    if (text.trim()) {
+      segments.push(text.trim())
+    }
+  }
+  
+  return segments.slice(0, 10)
 }
 
 async function sendToWeixin({ userId, toUser, text, contextToken, config, disableSplit = false }) {
   try {
     if (!text || !text.trim()) return
     
-    const segments = disableSplit ? [text.trim()] : splitTextToSegments(text)
+    let segments = disableSplit ? [text.trim()] : splitTextToSegments(text)
+    
+    // 双重检查：如果还是空的，直接用原文本
+    if (!segments || segments.length === 0) {
+      segments = [text.trim()]
+    }
     
     for (let i = 0; i < segments.length; i++) {
-      const segment = segments[i]
+      let segment = segments[i]
       if (!segment || !segment.trim()) continue
       
       if (i > 0) {
@@ -1329,6 +1342,22 @@ ${mergedText}
     
     console.log('[多用户微信机器人] 清理后回复:', finalResponse)
     console.log('[多用户微信机器人] 是否保存记忆:', isImportant)
+    
+    // 如果清理后回复是空的，就不发送
+    if (!finalResponse || !finalResponse.trim()) {
+      console.log('[多用户微信机器人] 清理后回复为空，不发送')
+      // 发个可爱的失败消息
+      const cuteFailureMsg = '嗷呜~对话被风云吃掉啦🥺'
+      await sendToWeixin({
+        userId,
+        toUser: fromUser,
+        text: cuteFailureMsg,
+        contextToken: lastMessage.contextToken,
+        config: account,
+        disableSplit: true
+      })
+      return
+    }
     
     addChatLog(userId, 'assistant', finalResponse)
     
