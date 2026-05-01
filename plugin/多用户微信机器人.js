@@ -13,11 +13,85 @@ async function startGoService() {
   }
 
   const goServicesDir = path.join(process.cwd(), 'core', 'AI-MultiUser-Core', 'go-services')
+  
+  // 检测操作系统
+  const isWindows = process.platform === 'win32'
+  const isLinux = process.platform === 'linux'
+  const isMac = process.platform === 'darwin'
+  
+  // 可执行文件名
+  let exeName = 'multiuser-wechat'
+  if (isWindows) exeName = 'multiuser-wechat.exe'
+  
+  const exePath = path.join(goServicesDir, exeName)
 
   try {
     console.log('[多用户微信机器人] 正在启动 Go 服务...')
     
-    goServiceProcess = spawn('go', ['run', 'cmd/server/main.go'], {
+    // 1. 检查是否有预编译文件
+    if (fs.existsSync(exePath)) {
+      console.log('[多用户微信机器人] 找到预编译的可执行文件，使用它启动')
+    } else {
+      console.log('[多用户微信机器人] 没有预编译文件，尝试编译...')
+      
+      // 2. 检查 Go 是否可用
+      try {
+        await checkGoAvailable()
+      } catch (checkErr) {
+        console.error('[多用户微信机器人] 错误：未安装 Go，且没有预编译的可执行文件')
+        console.error('[多用户微信机器人] 请选择以下方式之一：')
+        console.error('1. 安装 Go：访问 https://go.dev/dl/')
+        console.error('2. 使用预编译版本：运行 ./go-services/build.sh 编译（Linux/Mac）')
+        console.error('3. 使用预编译版本：运行 ./go-services/build.bat 编译（Windows）')
+        return
+      }
+      
+      // 3. 执行编译脚本
+      let buildCmd, buildArgs
+      if (isWindows) {
+        buildCmd = 'build.bat'
+      } else {
+        buildCmd = './build.sh'
+        // 确保脚本有执行权限
+        fs.chmodSync(path.join(goServicesDir, 'build.sh'), 0o755)
+      }
+      
+      console.log('[多用户微信机器人] 正在编译 Go 服务...')
+      const buildResult = await new Promise((resolve, reject) => {
+        const buildProcess = spawn(buildCmd, [], {
+          cwd: goServicesDir,
+          shell: true
+        })
+        
+        buildProcess.stdout.on('data', (data) => {
+          console.log(`[编译] ${data.toString().trim()}`)
+        })
+        
+        buildProcess.stderr.on('data', (data) => {
+          console.error(`[编译错误] ${data.toString().trim()}`)
+        })
+        
+        buildProcess.on('close', (code) => {
+          if (code === 0) {
+            resolve(true)
+          } else {
+            reject(new Error('编译失败'))
+          }
+        })
+        
+        buildProcess.on('error', (err) => reject(err))
+      })
+      
+      if (!fs.existsSync(exePath)) {
+        console.error('[多用户微信机器人] 编译成功但找不到可执行文件！')
+        return
+      }
+      
+      console.log('[多用户微信机器人] 编译成功！')
+    }
+    
+    // 4. 启动可执行文件
+    goServiceProcess = spawn(exePath, [], {
       cwd: goServicesDir,
       shell: true
     })
@@ -42,6 +116,22 @@ async function startGoService() {
   } catch (e) {
     console.error('[多用户微信机器人] 启动 Go 服务失败', e)
   }
+}
+
+async function checkGoAvailable() {
+  return new Promise((resolve, reject) => {
+    const check = spawn('go', ['version'], {
+      shell: true
+    })
+    check.on('close', (code) => {
+      if (code === 0) {
+        resolve()
+      } else {
+        reject(new Error('Go not found'))
+      }
+    })
+    check.on('error', (err) => reject(err))
+  })
 }
 
 // 插件加载时启动 Go 服务
