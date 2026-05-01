@@ -11,7 +11,10 @@
     <img src="https://img.shields.io/badge/MIT_License-007EC6?style=for-the-badge&logo=mit&logoColor=white" alt="MIT License">
   </a>
   <a href="https://github.com/fengyun0608/AI-MultiUser-Core">
-    <img src="https://img.shields.io/badge/Version-12.1.0-00ADD8?style=for-the-badge" alt="Version">
+    <img src="https://img.shields.io/badge/Version-15.0.0-00ADD8?style=for-the-badge" alt="Version">
+  </a>
+  <a href="https://golang.org/">
+    <img src="https://img.shields.io/badge/Go-00ADD8?style=for-the-badge&logo=go&logoColor=white" alt="Go">
   </a>
   <a href="https://github.com/fengyun0608/AI-MultiUser-Core/stargazers">
     <img src="https://img.shields.io/github/stars/fengyun0608/AI-MultiUser-Core?style=for-the-badge&logo=github" alt="GitHub stars">
@@ -50,7 +53,8 @@
 ## 📋 项目信息
 
 - **项目名称**: AI-MultiUser-Core
-- **版本**: 12.1.0
+- **版本**: 15.0.0
+- **架构**: Node.js + Go 混合架构
 - **开源协议**: MIT License
 - **项目路径**: core/AI-MultiUser-Core
 - **依赖项目**: [XRK-AGT](https://github.com/sunflowermm/XRK-AGT)
@@ -70,7 +74,17 @@
 ```
 AI-MultiUser-Core/
 ├── plugin/                          # 插件目录
-│   └── 多用户微信机器人.js      # 主插件 - 处理QQ群命令、登录流程、消息监听、AI对话
+│   └── 多用户微信机器人.js      # 主插件 - 处理QQ群命令、登录流程、消息监听
+│
+├── go-services/                    # Go 微服务目录（高性能模块）
+│   ├── cmd/
+│   │   └── server/
+│   │       └── main.go       # Go 服务入口
+│   ├── internal/
+│   │   ├── api/              # API 路由和处理
+│   │   ├── config/           # 配置加载
+│   │   └── ...
+│   └── go.mod
 │
 ├── accounts/                        # 用户数据根目录（完全隔离）
 │   ├── user-123456789/          # 用户1的数据目录（QQ号123456789）
@@ -206,25 +220,30 @@ AI-MultiUser-Core/
 - ✅ 聊天记录自动保留7天，过期清理
 - ✅ 二维码有效期5分钟
 - ✅ 支持二维码图片直接发送到QQ群（使用Puppeteer截图）
-- ✅ 最多发送10段，0.5-1秒随机延迟
+- ✅ 最多发送10段，1-1.7秒随机延迟
+- ✅ **Node.js + Go 混合架构** - LLM API调用、微信API调用都移到Go服务，性能更好、内存占用更低
 - ✅ `#更改人设` 支持任意长度的多行内容
 - ✅ 人设是最高优先级，比什么都重要
+- ✅ 用户3秒内多条消息会合并处理
+- ✅ 多API自动轮询，避免429限流
 
 ## 🛠️ 系统架构说明
 
-### 插件协作方式
+### 混合架构
 
-- **多用户微信机器人.js**：负责QQ群命令、微信登录、消息监听、AI对话、人设管理、消息回复
-- 单插件架构，无需其他插件依赖
+- **Node.js 插件（多用户微信机器人.js）**：负责QQ群命令处理、事件分发、Puppeteer截图
+- **Go 微服务**：负责LLM API调用、微信API调用（二维码获取、状态轮询、消息发送、消息获取）
+- **自动启停**：插件加载时自动启动Go服务，插件退出时自动停止Go服务
 
 ### 消息流程
 
 1. 用户在微信发送消息
-2. 多用户微信机器人.js监听并接收消息
-3. 调用AI生成回复
-4. 智能分段成短段落
-5. 每段0.5-1秒延迟发送
-6. 调用微信API发送回复
+2. Node.js 插件监听消息
+3. 通过HTTP调用Go服务获取微信更新
+4. 调用Go服务进行LLM API调用生成回复
+5. 智能分段成短段落
+6. 每段1-1.7秒延迟发送
+7. 调用Go服务发送微信消息
 
 ---
 

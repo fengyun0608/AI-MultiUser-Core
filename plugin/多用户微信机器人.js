@@ -1,7 +1,67 @@
 import fs from 'node:fs'
 import path from 'node:path'
-import { randomUUID } from 'node:crypto'
+
+import { spawn } from 'node:child_process'
 import puppeteer from 'puppeteer'
+
+let goServiceProcess = null
+
+async function startGoService() {
+  if (goServiceProcess) {
+    console.log('[多用户微信机器人] Go 服务已在运行')
+    return
+  }
+
+  const goServicesDir = path.join(process.cwd(), 'core', 'AI-MultiUser-Core', 'go-services')
+
+  try {
+    console.log('[多用户微信机器人] 正在启动 Go 服务...')
+    
+    goServiceProcess = spawn('go', ['run', 'cmd/server/main.go'], {
+      cwd: goServicesDir,
+      shell: true
+    })
+
+    goServiceProcess.stdout.on('data', (data) => {
+      console.log(`[Go 服务] ${data.toString().trim()}`)
+    })
+
+    goServiceProcess.stderr.on('data', (data) => {
+      console.error(`[Go 服务错误] ${data.toString().trim()}`)
+    })
+
+    goServiceProcess.on('close', (code) => {
+      console.log(`[多用户微信机器人] Go 服务已退出，代码: ${code}`)
+      goServiceProcess = null
+    })
+
+    // 等待 2 秒让服务启动
+    await new Promise(r => setTimeout(r, 2000))
+    console.log('[多用户微信机器人] Go 服务启动成功！')
+
+  } catch (e) {
+    console.error('[多用户微信机器人] 启动 Go 服务失败', e)
+  }
+}
+
+// 插件加载时启动 Go 服务
+setTimeout(startGoService, 1000)
+
+// 进程退出时关闭 Go 服务
+process.on('exit', () => {
+  if (goServiceProcess) {
+    console.log('[多用户微信机器人] 正在关闭 Go 服务...')
+    goServiceProcess.kill()
+  }
+})
+
+process.on('SIGINT', () => {
+  if (goServiceProcess) {
+    console.log('[多用户微信机器人] 正在关闭 Go 服务...')
+    goServiceProcess.kill()
+  }
+  process.exit()
+})
 
 const TEMP_DIR = path.join(process.cwd(), 'data', 'temp', 'multiuser-wechat')
 
@@ -56,122 +116,41 @@ const userDebounceTimers = new Map()
 // 消息合并等待时间（毫秒）
 const MESSAGE_MERGE_WAIT_MS = 3000
 
-// 限流控制：更宽松的设置
-let apiRequestTimes = []
-const MAX_REQUESTS_PER_MINUTE = 240 // 3个API，每个80次
+// 简单的用户间隔限流（在 Node 端保留基本限流）
 const MIN_INTERVAL_PER_USER = 3000 // 同一个用户至少间隔3秒
-
-// 记录每个用户最后请求时间
 const userLastRequestTimes = new Map()
 
-// API轮询索引
-let currentApiIndex = 0
-
 function checkRateLimit(userId) {
-  // 先检查用户最小间隔
   const now = Date.now()
   const lastTime = userLastRequestTimes.get(userId)
   if (lastTime && now - lastTime < MIN_INTERVAL_PER_USER) {
     console.log(`[多用户微信机器人] ${userId} 请求太快，跳过`)
     return false
   }
-  
-  // 再检查全局限流
-  const oneMinuteAgo = now - 60 * 1000
-  apiRequestTimes = apiRequestTimes.filter(t => t > oneMinuteAgo)
-  if (apiRequestTimes.length >= MAX_REQUESTS_PER_MINUTE) {
-    console.log('[多用户微信机器人] 全局限流已达上限，跳过')
-    return false
-  }
-  
   return true
 }
 
 function addRateLimit(userId) {
-  const now = Date.now()
-  userLastRequestTimes.set(userId, now)
-  apiRequestTimes.push(now)
+  userLastRequestTimes.set(userId, Date.now())
 }
 
-function randomWechatUin() {
-  const uint32 = new Uint32Array(1)
-  uint32[0] = Math.random() * 0xFFFFFF
-  return Buffer.from(String(uint32[0]), 'utf8').toString('base64')
-}
 
-function ensureTrailingSlash(url) {
-  return url.endsWith('/') ? url : `${url}/`
-}
 
-function buildHeaders({ token, body }) {
-  const headers = {
-    'Content-Type': 'application/json',
-    AuthorizationType: 'ilink_bot_token',
-    'Content-Length': String(Buffer.byteLength(body, 'utf8')),
-    'X-WECHAT-UIN': randomWechatUin(),
-    'iLink-App-Id': ILINK_APP_ID,
-    'iLink-App-ClientVersion': CHANNEL_VERSION,
-  }
-  if (token?.trim()) {
-    headers.Authorization = `Bearer ${token.trim()}`
-  }
-  return headers
-}
-
-async function apiGetFetch({ baseUrl, endpoint, timeoutMs, label }) {
-  const base = ensureTrailingSlash(baseUrl)
-  const url = new URL(endpoint, base)
-  const hdrs = {
-    'iLink-App-Id': ILINK_APP_ID,
-    'iLink-App-ClientVersion': CHANNEL_VERSION,
-  }
-  const timeout = timeoutMs
-  const controller = timeout != null && timeout > 0 ? new AbortController() : undefined
-  const t = controller != null && timeout != null ? setTimeout(() => controller.abort(), timeout) : undefined
+// 调用 Go 服务的工具函数
+async function callGoService(endpoint, data = {}) {
   try {
-    const res = await fetch(url.toString(), {
-      method: 'GET',
-      headers: hdrs,
-      ...(controller ? { signal: controller.signal } : {}),
-    })
-    if (t !== undefined) clearTimeout(t)
-    const rawText = await res.text()
-    if (!res.ok) {
-      throw new Error(`${label} ${res.status}`)
-    }
-    return rawText
-  } catch (err) {
-    if (t !== undefined) clearTimeout(t)
-    throw err
-  }
-}
-
-async function apiPostFetch({ baseUrl, endpoint, body, token, timeoutMs, label }) {
-  const base = ensureTrailingSlash(baseUrl)
-  const url = new URL(endpoint, base)
-  const hdrs = buildHeaders({ token, body })
-  const controller = new AbortController()
-  const t = setTimeout(() => controller.abort(), timeoutMs)
-  try {
-    const res = await fetch(url.toString(), {
+    const res = await fetch(`http://localhost:8080${endpoint}`, {
       method: 'POST',
-      headers: hdrs,
-      body,
-      signal: controller.signal,
+      headers: {
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify(data),
     })
-    clearTimeout(t)
-    const rawText = await res.text()
-    if (!res.ok) {
-      throw new Error(`${label} ${res.status}`)
-    }
-    try {
-      return JSON.parse(rawText)
-    } catch (parseErr) {
-      return rawText
-    }
+    const json = await res.json()
+    return json
   } catch (err) {
-    clearTimeout(t)
-    throw err
+    console.error('[多用户微信机器人] Go 服务调用失败:', err)
+    return { success: false, error: String(err) }
   }
 }
 
@@ -245,31 +224,20 @@ function purgeExpiredLogins() {
 
 async function fetchQRCode(baseUrl, botType) {
   console.log('[多用户微信机器人] 获取二维码...')
-  const rawText = await apiGetFetch({
-    baseUrl,
-    endpoint: `ilink/bot/get_bot_qrcode?bot_type=${encodeURIComponent(botType)}`,
-    timeoutMs: 15000,
-    label: 'fetchQRCode',
-  })
-  return JSON.parse(rawText)
+  const result = await callGoService('/api/v1/wx/qrcode', { baseUrl, botType })
+  if (!result.success) {
+    throw new Error(result.error || 'Failed to fetch QR code')
+  }
+  return result.data
 }
 
 async function pollQRStatus(baseUrl, qrcode) {
-  try {
-    const rawText = await apiGetFetch({
-      baseUrl,
-      endpoint: `ilink/bot/get_qrcode_status?qrcode=${encodeURIComponent(qrcode)}`,
-      timeoutMs: QR_LONG_POLL_TIMEOUT_MS,
-      label: 'pollQRStatus',
-    })
-    return JSON.parse(rawText)
-  } catch (err) {
-    if (err instanceof Error && err.name === 'AbortError') {
-      return { status: 'wait' }
-    }
-    console.warn('[多用户微信机器人] 轮询状态错误', String(err))
+  const result = await callGoService('/api/v1/wx/qrcode/status', { baseUrl, qrcode })
+  if (!result.success) {
+    console.warn('[多用户微信机器人] 轮询状态错误', result.error)
     return { status: 'wait' }
   }
+  return result.data
 }
 
 async function startWeixinLogin(userId, pluginInstance) {
@@ -457,14 +425,19 @@ async function monitorAccountLoop(userId, account, signal) {
         base_info: { channel_version: CHANNEL_VERSION },
       })
       
-      const resp = await apiPostFetch({
+      // 调用 Go 服务获取微信更新
+      const result = await callGoService('/api/v1/wx/getupdates', {
         baseUrl,
-        endpoint: 'ilink/bot/getupdates',
-        body: reqBody,
         token: currentAccount.token,
-        timeoutMs: QR_LONG_POLL_TIMEOUT_MS,
-        label: 'getUpdates',
+        getUpdatesBuf: currentAccount.get_updates_buf,
+        timeoutMs: QR_LONG_POLL_TIMEOUT_MS
       })
+      
+      if (!result.success) {
+        throw new Error(result.error || '获取更新失败')
+      }
+      
+      const resp = result.data
       
       // 成功了，重置错误计数
       errorCount = 0
@@ -486,15 +459,14 @@ async function monitorAccountLoop(userId, account, signal) {
       console.error(`[多用户微信机器人] ${userId} 消息监听出错 (${errorCount}/${MAX_ERRORS})`, err.message)
       
       if (errorCount >= MAX_ERRORS) {
-        console.error(`[多用户微信机器人] ${userId} 错误次数过多，重启监听`)
-        // 停止当前监听，然后重新启动
+        console.error(`[多用户微信机器人] ${userId} 错误次数过多，停止监听，请用户到 QQ 群重新上线`)
+        // 停止当前监听，更新账号状态
         stopAccountMonitor(userId)
-        // 重新加载账号并启动
+        // 将账号标记为禁用
         const freshAccount = loadAccount(userId)
-        if (freshAccount && freshAccount.token && freshAccount.enabled) {
-          await new Promise(r => setTimeout(r, 1000))
-          startAccountMonitor(userId, freshAccount)
-          console.log(`[多用户微信机器人] ${userId} 监听已重启`)
+        if (freshAccount) {
+          freshAccount.enabled = false
+          saveAccount(userId, freshAccount)
         }
         break
       }
@@ -664,7 +636,7 @@ function getRecentMemoriesString(userId, limit = 5) {
   const memories = getAllMemories(userId).slice(0, limit)
   if (memories.length === 0) return ''
   
-  let lines = ['【重要记忆（记住这些事）】']
+  let lines = []
   for (const m of memories) {
     const importance = m.importance === 'important' ? '⭐' : ''
     lines.push(`${importance} ${m.title}`)
@@ -718,62 +690,42 @@ async function callAI(prompt, userId) {
     return null
   }
   
-  const config = loadPluginConfig()
-  if (!config || !config.apis || config.apis.length === 0) {
-    console.error('[多用户微信机器人] 插件配置未找到')
+  // 调用 Go 服务
+  try {
+    const response = await fetch('http://localhost:8080/api/v1/llm/chat', {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json'
+      },
+      body: JSON.stringify({
+        messages: [
+          {
+            role: 'user',
+            content: prompt
+          }
+        ]
+      })
+    })
+    
+    if (!response.ok) {
+      const err = await response.text()
+      throw new Error(err)
+    }
+    
+    const data = await response.json()
+    
+    if (!data.success) {
+      throw new Error(data.error)
+    }
+    
+    addRateLimit(userId)
+    return data.content
+    
+  } catch (e) {
+    console.error('[多用户微信机器人] AI 调用失败', e)
+    // Go 服务调用失败，直接返回 null
     return null
   }
-
-  // 尝试所有API，直到成功
-  for (let i = 0; i < config.apis.length; i++) {
-    const apiIndex = (currentApiIndex + i) % config.apis.length
-    const api = config.apis[apiIndex]
-    
-    console.log(`[多用户微信机器人] 尝试API: ${apiIndex}`)
-    
-    try {
-      const response = await fetch(api.url, {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          'Authorization': `Bearer ${api.key}`
-        },
-        body: JSON.stringify({
-          model: api.model,
-          messages: [
-            {
-              role: 'user',
-              content: prompt
-            }
-          ],
-          temperature: config.temperature || 0.7,
-          max_tokens: config.maxTokens || 1000
-        })
-      })
-
-      if (response.ok) {
-        const data = await response.json()
-        const result = data.choices?.[0]?.message?.content
-        
-        if (result) {
-          // 成功了，更新索引，记录限流
-          currentApiIndex = apiIndex + 1
-          addRateLimit(userId)
-          console.log(`[多用户微信机器人] API ${apiIndex} 调用成功`)
-          return result
-        }
-      } else {
-        const errorText = await response.text()
-        console.warn(`[多用户微信机器人] API ${apiIndex} 失败: ${response.status}`, errorText)
-      }
-    } catch (e) {
-      console.warn(`[多用户微信机器人] API ${apiIndex} 异常:`, e.message)
-    }
-  }
-  
-  // 所有API都失败了
-  console.error('[多用户微信机器人] 所有API调用失败')
-  return null
 }
 
 function randomDelay(min, max) {
@@ -821,30 +773,19 @@ async function sendToWeixin({ userId, toUser, text, contextToken, config }) {
         await new Promise(r => setTimeout(r, delay))
       }
       
-      const clientId = randomUUID()
-      const item_list = [{ type: 1, text_item: { text: segment } }]
-      
-      const body = JSON.stringify({
-        msg: {
-          from_user_id: "",
-          to_user_id: toUser,
-          client_id: clientId,
-          message_type: 2,
-          message_state: 2,
-          item_list: item_list,
-          context_token: contextToken
-        },
-        base_info: { channel_version: CHANNEL_VERSION }
-      })
-      
-      await apiPostFetch({
+      // 调用 Go 服务发送
+      const result = await callGoService('/api/v1/wx/send', {
         baseUrl: config.baseUrl,
-        endpoint: 'ilink/bot/sendmessage',
         token: config.token,
-        body: body,
-        timeoutMs: 15000,
-        label: 'sendWeixin'
+        toUserId: toUser,
+        text: segment,
+        contextToken: contextToken,
+        channelVersion: CHANNEL_VERSION
       })
+      
+      if (!result.success) {
+        throw new Error(result.error)
+      }
       
       console.log(`[多用户微信机器人] 发送段落 ${i + 1}/${segments.length}: ${segment.substring(0, 30)}${segment.length > 30 ? '...' : ''}`)
     }

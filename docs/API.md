@@ -17,9 +17,175 @@
 
 - **项目路径**: core/AI-MultiUser-Core
 - **项目名称**: AI-MultiUser-Core
-- **版本**: 13.0.0
+- **版本**: 15.0.0
+- **架构**: Node.js + Go 混合架构
 - **开源协议**: MIT License
 - **依赖项目**: [XRK-AGT](https://github.com/sunflowermm/XRK-AGT)
+
+---
+
+## Go 微服务 API
+
+本项目使用 Node.js + Go 混合架构，Go 微服务负责高性能模块（LLM API、微信 API）。
+
+**服务地址**: `http://localhost:8080`
+
+---
+
+### LLM API
+
+#### 聊天接口
+
+**接口**: `POST /api/v1/llm/chat`
+
+**请求体**:
+```json
+{
+  "messages": [
+    {
+      "role": "system",
+      "content": "你是一个助手..."
+    },
+    {
+      "role": "user",
+      "content": "你好"
+    }
+  ]
+}
+```
+
+**响应**:
+```json
+{
+  "success": true,
+  "content": "你好！"
+}
+```
+
+**功能**:
+- 多 API 自动轮询
+- 自动故障切换
+- 负载均衡
+
+---
+
+### 微信 API
+
+#### 获取二维码
+
+**接口**: `POST /api/v1/wx/qrcode`
+
+**请求体**:
+```json
+{
+  "baseUrl": "https://xxx",
+  "botType": "xxx"
+}
+```
+
+**响应**:
+```json
+{
+  "success": true,
+  "data": {
+    "qrcode": "xxx",
+    "qrcode_img_content": "https://xxx"
+  }
+}
+```
+
+---
+
+#### 查询二维码状态
+
+**接口**: `POST /api/v1/wx/qrcode/status`
+
+**请求体**:
+```json
+{
+  "baseUrl": "https://xxx",
+  "qrcode": "xxx"
+}
+```
+
+**响应**:
+```json
+{
+  "success": true,
+  "status": "wait",
+  "data": {
+    "status": "wait",
+    "redirect_host": "xxx",
+    "ilink_bot_id": "xxx",
+    "bot_token": "xxx",
+    "base_url": "https://xxx",
+    "ilink_user_id": "xxx"
+  }
+}
+```
+
+---
+
+#### 获取微信更新
+
+**接口**: `POST /api/v1/wx/getupdates`
+
+**请求体**:
+```json
+{
+  "baseUrl": "https://xxx",
+  "token": "xxx",
+  "getUpdatesBuf": "",
+  "timeoutMs": 35000
+}
+```
+
+**响应**:
+```json
+{
+  "success": true,
+  "data": {
+    "get_updates_buf": "xxx",
+    "msgs": [
+      {
+        "seq": 1,
+        "from_user_id": "xxx",
+        "to_user_id": "xxx",
+        "message_type": 1,
+        "message_state": 2,
+        "item_list": [...],
+        "context_token": "xxx"
+      }
+    ]
+  }
+}
+```
+
+---
+
+#### 发送微信消息
+
+**接口**: `POST /api/v1/wx/send`
+
+**请求体**:
+```json
+{
+  "baseUrl": "https://xxx",
+  "token": "xxx",
+  "toUserId": "xxx",
+  "text": "你好",
+  "contextToken": "xxx",
+  "channelVersion": "2.1.10"
+}
+```
+
+**响应**:
+```json
+{
+  "success": true,
+  "content": "ok"
+}
+```
 
 ---
 
@@ -159,6 +325,12 @@
 ---
 
 ## LLM API接口
+
+### 多API配置
+
+系统支持配置多个API源，自动轮询使用，避免429限流。
+
+配置方法见 [CONFIG.md](CONFIG.md)。
 
 ### 聊天补全
 

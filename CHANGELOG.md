@@ -1,5 +1,46 @@
 # CHANGELOG
 
+## v15.0.0 (2026-05-01)
+
+### ✨ 重大更新
+
+- **Go 服务新增微信 API 调用** - 将微信二维码获取、轮询状态、发送消息、获取更新都移到 Go 服务
+- **Node.js 插件精简** - 只保留 QQ 群命令处理、事件分发、Puppeteer 截图
+- **冗余代码清理** - 删除 randomUUID、randomWechatUin、apiGetFetch、apiPostFetch 等冗余函数
+- **变量清理** - 删除 currentApiIndex、apiRequestTimes 等在 Node 端不再需要的变量
+- **监听逻辑优化** - 监听出错达到 5 次后自动停止监听，将账号标记为禁用，用户需在 QQ 群使用 #启动机器人 命令重新上线
+- **架构优化** - 现在 Go 服务处理 LLM API 和微信 API，性能更好
+
+### 🔧 技术改进
+
+- 新增 Go 服务 /api/v1/wx/qrcode 路由 - 处理获取二维码
+- 新增 Go 服务 /api/v1/wx/qrcode/status 路由 - 处理轮询状态
+- 新增 Go 服务 /api/v1/wx/send 路由 - 处理发送微信消息
+- 新增 Go 服务 /api/v1/wx/getupdates 路由 - 处理获取微信更新
+- Node.js 插件新增 callGoService() 函数 - 统一调用 Go 服务 API
+- 修复记忆重复问题 - 移除 getRecentMemoriesString 里重复的「【重要记忆】」
+- 所有文档更新到 v15.0.0
+
+---
+
+## v14.0.0 (2026-05-01)
+
+### ✨ 重大更新
+
+- **Node.js + Go 混合架构** - 重构插件架构，采用混合架构
+- **Go 微服务** - 新建 go-services 目录，高性能模块用 Go 实现
+- **LLM API 服务** - Go 实现 LLM API 调用模块，支持多 API 轮询和故障切换
+- **Node.js 调用优化** - callAI 函数改为调用 Go 服务，降低内存占用
+- **自动启动 Go 服务** - 插件加载时自动启动 Go 服务，无需手动操作
+- **自动关闭 Go 服务** - 插件退出时自动关闭 Go 服务
+
+### 📦 目录结构更新
+
+- 新增 go-services/ 目录，包含 Go 微服务代码
+- plugin/ 目录保持不变，保留微信 API 和 QQ 命令处理
+
+---
+
 ## v13.0.0 (2026-05-01)
 
 ### ✨ 主要更新

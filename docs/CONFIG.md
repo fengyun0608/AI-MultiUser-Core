@@ -18,7 +18,7 @@
 
 - **项目路径**: core/AI-MultiUser-Core
 - **项目名称**: AI-MultiUser-Core
-- **版本**: 13.0.0
+- **版本**: 15.0.0
 - **开源协议**: MIT License
 - **依赖项目**: [XRK-AGT](https://github.com/sunflowermm/XRK-AGT)
 
@@ -34,9 +34,10 @@
 
 | 配置项 | 类型 | 默认值 | 说明 |
 |--------|------|--------|------|
-| `apiUrl` | string | `https://api.minewuer.com/v1/chat/completions` | LLM API 地址 |
-| `apiKey` | string | - | API 密钥（必填） |
-| `model` | string | `deepseek-v4-pro-chat` | 模型名称 |
+| `apis` | array | - | API 配置数组（支持多 API 轮询） |
+| `apis[].url` | string | - | API 地址 |
+| `apis[].key` | string | - | API 密钥 |
+| `apis[].model` | string | - | 模型名称 |
 | `temperature` | number | 0.7 | 温度参数，控制回复创造性 |
 | `maxTokens` | number | 1000 | 最大 Token 数 |
 
@@ -44,9 +45,18 @@
 
 ```json
 {
-  "apiUrl": "https://api.example.com/v1/chat/completions",
-  "apiKey": "sk-xxx",
-  "model": "deepseek-v4-pro-chat",
+  "apis": [
+    {
+      "url": "https://api.yourprovider1.com/v1/chat/completions",
+      "key": "sk-xxx",
+      "model": "your-model-1"
+    },
+    {
+      "url": "https://api.yourprovider2.com/v1/chat/completions",
+      "key": "sk-yyy",
+      "model": "your-model-2"
+    }
+  ],
   "temperature": 0.7,
   "maxTokens": 1000
 }
@@ -158,6 +168,14 @@
 - 适当使用表情符号（😊✨❤️）
 - 回复长度适中，不要太长
 ```
+
+### 动作描述说明
+
+默认情况下，AI不会使用动作描述（如 `(笑)`、`(看向你)` 等）。
+
+如果需要AI使用动作描述，可以在人设文件中添加相关要求，或包含括号内容。
+
+系统会自动检测人设中是否包含动作描述要求，如果包含，则允许AI使用动作描述。
 
 ### ⚠️ 注意事项
 
