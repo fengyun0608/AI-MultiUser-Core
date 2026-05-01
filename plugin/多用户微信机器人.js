@@ -735,21 +735,21 @@ async function checkApiHealth(api) {
   }
   
   // 快速检查：发送一个简单请求（max_tokens=1）
-  try {
-    const response = await fetch(api.url, {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        'Authorization': `Bearer ${api.key}`
-      },
-      body: JSON.stringify({
-        model: api.model,
-        messages: [{ role: 'user', content: 'hi' }],
-        max_tokens: 1,
-        temperature: 0
-      }),
-      signal: AbortSignal.timeout(3000) // 3秒超时
-    })
+    try {
+      const response = await fetch(api.url, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'Authorization': `Bearer ${api.key}`
+        },
+        body: JSON.stringify({
+          model: api.model,
+          messages: [{ role: 'user', content: 'hi' }],
+          max_tokens: 1,
+          temperature: 0
+        }),
+        signal: AbortSignal.timeout(10000) // 10秒超时
+      })
     
     const ok = response.ok
     apiHealth.set(api.url, { ok, lastCheck: now })
@@ -863,7 +863,7 @@ async function callAI(prompt, userId) {
           temperature: 0.7,
           max_tokens: 1000
         }),
-        signal: AbortSignal.timeout(15000) // 15秒超时
+        signal: AbortSignal.timeout(30000) // 30秒超时
       })
 
       if (response.ok) {
