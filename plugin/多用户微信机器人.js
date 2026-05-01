@@ -955,7 +955,7 @@ async function processMergedMessages(userId, account, userKey) {
   // 生成prompt
   const personaText = loadPersona(userId)
   const history = getChatHistoryString(userId)
-  const recentMemories = getRecentMemoriesString(userId)
+  const recentMemories = getRecentMemoriesString(userId, 2)
   const beijingTime = getBeijingTime()
   
   // 检查人设是否要求使用动作描述
@@ -977,6 +977,13 @@ ${history || ''}
 用户说：
 ${mergedText}
 
+回复格式：
+1. 先判断这段对话是否重要（重要→true，不重要→false）
+2. 然后是你的回复内容
+3. 格式：
+[重要: true/false]
+[你的回复内容]
+
 直接用第一人称回复，自然口语，像真人一样聊天。
 
 注意：
@@ -986,21 +993,31 @@ ${mergedText}
 4. 不要加人名前缀
 5. 别编其他角色的话
 6. 别重复用户的话，也别编用户没说的
-7. 记忆只是让你记住，别把记忆当成对话说出来
-8. 只回现在的话
+7. 记忆只是让你记住的信息，别当成对话说出来
+8. 只回现在的话，别扯别的
 9. 日常聊天3-5句，每句别太长
 10. 别一直重复旧话题
 11. 回复要有结尾，别说半截话
-12. 如果有人说你是AI，按人设反应（傲娇就怼，温柔就解释）`
+12. 如果有人说你是AI，按人设反应（傲娇就怼，温柔就解释）
+13. 重要对话：用户说名字、地址、重要约定、重要事情才是重要，普通闲聊不重要`
   
   console.log('[多用户微信机器人] 调用AI中...')
   const aiResponse = await callAI(prompt, userId)
   console.log('[多用户微信机器人] AI回复:', aiResponse)
   
   if (aiResponse && aiResponse.trim()) {
-    // 后处理：清理违规内容
+    // 解析AI回复，提取重要性
+    let isImportant = false
     let finalResponse = aiResponse.trim()
     
+    // 尝试匹配 [重要: true/false] 格式
+    const importantMatch = finalResponse.match(/\[重要\s*:\s*(true|false)\]/i)
+    if (importantMatch) {
+      isImportant = importantMatch[1].toLowerCase() === 'true'
+      finalResponse = finalResponse.replace(importantMatch[0], '').trim()
+    }
+    
+    // 后处理：清理违规内容
     // 1. 只有当人设不允许动作时，才移除括号内容
     if (!allowActions) {
       finalResponse = finalResponse.replace(/（[^）]*）/g, '') // 中文括号
@@ -1021,18 +1038,22 @@ ${mergedText}
     finalResponse = finalResponse.replace(/\n\s*\n/g, '\n').trim()
     
     console.log('[多用户微信机器人] 清理后回复:', finalResponse)
+    console.log('[多用户微信机器人] 是否保存记忆:', isImportant)
     
     addChatLog(userId, 'assistant', finalResponse)
     
-    const memoryTitle = generateSimpleTitle(mergedText, finalResponse)
-    saveMemoryItem(userId, {
-      title: memoryTitle,
-      importance: 'normal',
-      type: 'chat',
-      content: `${mergedText}\n---\n${finalResponse}`,
-      userText: mergedText,
-      assistantText: finalResponse
-    })
+    // 只有AI判断重要的才保存记忆
+    if (isImportant) {
+      const memoryTitle = generateSimpleTitle(mergedText, finalResponse)
+      saveMemoryItem(userId, {
+        title: memoryTitle,
+        importance: 'normal',
+        type: 'chat',
+        content: `${mergedText}\n---\n${finalResponse}`,
+        userText: mergedText,
+        assistantText: finalResponse
+      })
+    }
     
     console.log('[多用户微信机器人] 准备发送微信消息...')
     await sendToWeixin({
