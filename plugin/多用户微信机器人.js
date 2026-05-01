@@ -806,11 +806,11 @@ function splitTextToSegments(text) {
   return segments.slice(0, 10).length > 0 ? segments.slice(0, 10) : [text.trim()]
 }
 
-async function sendToWeixin({ userId, toUser, text, contextToken, config }) {
+async function sendToWeixin({ userId, toUser, text, contextToken, config, disableSplit = false }) {
   try {
     if (!text || !text.trim()) return
     
-    const segments = splitTextToSegments(text)
+    const segments = disableSplit ? [text.trim()] : splitTextToSegments(text)
     
     for (let i = 0; i < segments.length; i++) {
       const segment = segments[i]
@@ -849,6 +849,8 @@ async function sendToWeixin({ userId, toUser, text, contextToken, config }) {
       
       console.log(`[多用户微信机器人] 发送段落 ${i + 1}/${segments.length}: ${segment.substring(0, 30)}${segment.length > 30 ? '...' : ''}`)
     }
+    
+    console.log('[多用户微信机器人] 微信消息发送完成')
   } catch (e) {
     console.error('[多用户微信机器人] 发送微信消息失败', e)
   }
@@ -937,7 +939,7 @@ async function processSystemCommand(userId, account, fromUser, contextToken, com
   // 命令1: #清除记忆
   if (cmd.startsWith('清除记忆')) {
     clearMemory(userId)
-    await sendToWeixin({ userId, toUser: fromUser, text: '聊天记忆已清除', contextToken, config: account })
+    await sendToWeixin({ userId, toUser: fromUser, text: '聊天记忆已清除', contextToken, config: account, disableSplit: true })
     return
   }
   
@@ -947,9 +949,9 @@ async function processSystemCommand(userId, account, fromUser, contextToken, com
     if (newPersona) {
       const personaDir = path.join(getAccountDir(userId), 'persona.md')
       fs.writeFileSync(personaDir, newPersona, 'utf-8')
-      await sendToWeixin({ userId, toUser: fromUser, text: '人设已更新', contextToken, config: account })
+      await sendToWeixin({ userId, toUser: fromUser, text: '人设已更新', contextToken, config: account, disableSplit: true })
     } else {
-      await sendToWeixin({ userId, toUser: fromUser, text: '请在命令后加上人设内容，例如：#更改人设 你是一个温柔的女孩', contextToken, config: account })
+      await sendToWeixin({ userId, toUser: fromUser, text: '请在命令后加上人设内容，例如：#更改人设 你是一个温柔的女孩', contextToken, config: account, disableSplit: true })
     }
     return
   }
@@ -962,9 +964,9 @@ async function processSystemCommand(userId, account, fromUser, contextToken, com
       personaText = fs.readFileSync(personaDir, 'utf-8')
     }
     if (personaText.trim()) {
-      await sendToWeixin({ userId, toUser: fromUser, text: `当前人设:\n\n${personaText}`, contextToken, config: account })
+      await sendToWeixin({ userId, toUser: fromUser, text: `当前人设:\n\n${personaText}`, contextToken, config: account, disableSplit: true })
     } else {
-      await sendToWeixin({ userId, toUser: fromUser, text: '还没有设置人设，请使用 #更改人设 来设置', contextToken, config: account })
+      await sendToWeixin({ userId, toUser: fromUser, text: '还没有设置人设，请使用 #更改人设 来设置', contextToken, config: account, disableSplit: true })
     }
     return
   }
@@ -996,12 +998,12 @@ async function processSystemCommand(userId, account, fromUser, contextToken, com
       infoText += `最后活跃: ${date.toLocaleString('zh-CN')}\n`
     }
     
-    await sendToWeixin({ userId, toUser: fromUser, text: infoText, contextToken, config: account })
+    await sendToWeixin({ userId, toUser: fromUser, text: infoText, contextToken, config: account, disableSplit: true })
     return
   }
   
   // 未知命令
-  await sendToWeixin({ userId, toUser: fromUser, text: '未知命令，可用命令：\n\n#清除记忆\n#更改人设 [人设内容]\n#当前人设\n#我的信息', contextToken, config: account })
+  await sendToWeixin({ userId, toUser: fromUser, text: '未知命令，可用命令：\n\n#清除记忆\n#更改人设 [人设内容]\n#当前人设\n#我的信息', contextToken, config: account, disableSplit: true })
 }
 
 // 处理合并后的消息
@@ -1153,7 +1155,8 @@ ${mergedText}
       toUser: fromUser,
       text: cuteFailureMsg,
       contextToken: lastMessage.contextToken,
-      config: account
+      config: account,
+      disableSplit: true
     })
   }
 }
