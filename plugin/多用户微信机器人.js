@@ -517,6 +517,27 @@ function getMemoriesDir(userId) {
   return path.join(getAccountDir(userId), 'memories')
 }
 
+function getUserApiConfigPath(userId) {
+  return path.join(getAccountDir(userId), 'api-config.json')
+}
+
+function loadUserApiConfig(userId) {
+  const configPath = getUserApiConfigPath(userId)
+  try {
+    if (fs.existsSync(configPath)) {
+      return JSON.parse(fs.readFileSync(configPath, 'utf8'))
+    }
+  } catch (err) {
+    console.error('[多用户微信机器人] 加载用户API配置失败', err)
+  }
+  return null
+}
+
+function saveUserApiConfig(userId, config) {
+  const configPath = getUserApiConfigPath(userId)
+  fs.writeFileSync(configPath, JSON.stringify(config, null, 2))
+}
+
 function getBeijingTime() {
   const now = new Date()
   const beijingOffset = 8 * 60 * 60 * 1000
@@ -772,19 +793,40 @@ async function callAI(prompt, userId) {
     return null
   }
   
-  const config = loadPluginConfig()
-  if (!config || !config.apis || config.apis.length === 0) {
-    console.error('[多用户微信机器人] 插件配置未找到')
-    return null
+  // 先看用户有没有配置自定义API且启用
+  const userApiConfig = loadUserApiConfig(userId)
+  let useUserApi = false
+  let apisToUse = []
+  
+  if (userApiConfig && userApiConfig.enabled && userApiConfig.apis && userApiConfig.apis.length > 0) {
+    // 使用用户自定义的API
+    useUserApi = true
+    apisToUse = userApiConfig.apis
+    console.log(`[多用户微信机器人] 用户 ${userId} 使用自定义API`)
+  } else {
+    // 使用官方配置的API
+    const config = loadPluginConfig()
+    if (!config || !config.apis || config.apis.length === 0) {
+      console.error('[多用户微信机器人] 插件配置未找到')
+      return null
+    }
+    apisToUse = config.apis
   }
 
   // 获取可用的API
-  const availableApis = await getAvailableApis(config)
+  const availableApis = []
+  for (const api of apisToUse) {
+    const ok = await checkApiHealth(api)
+    if (ok) {
+      availableApis.push(api)
+    }
+  }
+  
   if (availableApis.length === 0) {
     console.error('[多用户微信机器人] 没有可用的API')
     return null
   }
-  console.log(`[多用户微信机器人] 可用API数量: ${availableApis.length}/${config.apis.length}`)
+  console.log(`[多用户微信机器人] 可用API数量: ${availableApis.length}/${apisToUse.length}`)
 
   // 只在可用的API中轮询
   const originalIndex = currentApiIndex % availableApis.length
@@ -809,8 +851,8 @@ async function callAI(prompt, userId) {
               content: prompt
             }
           ],
-          temperature: config.temperature || 0.7,
-          max_tokens: config.maxTokens || 1000
+          temperature: 0.7,
+          max_tokens: 1000
         })
       })
 
@@ -820,8 +862,7 @@ async function callAI(prompt, userId) {
         
         if (result) {
           // 成功了，更新索引，记录限流
-          // 找到这个API在原始列表中的索引
-          const originalApiIndex = config.apis.findIndex(a => a.url === api.url)
+          const originalApiIndex = apisToUse.findIndex(a => a.url === api.url)
           currentApiIndex = originalApiIndex + 1
           addRateLimit(userId)
           console.log(`[多用户微信机器人] API ${api.url} 调用成功`)
@@ -1066,8 +1107,81 @@ async function processSystemCommand(userId, account, fromUser, contextToken, com
     return
   }
   
+  // 命令5: #切换官方
+  if (cmd === '切换官方') {
+    let currentConfig = loadUserApiConfig(userId) || {}
+    currentConfig.enabled = false
+    saveUserApiConfig(userId, currentConfig)
+    await sendToWeixin({ userId, toUser: fromUser, text: '已切换为官方提供的API', contextToken, config: account, disableSplit: true })
+    return
+  }
+  
+  // 命令6: #切换自定义
+  if (cmd === '切换自定义') {
+    let currentConfig = loadUserApiConfig(userId) || {}
+    if (!currentConfig.apis || currentConfig.apis.length === 0) {
+      await sendToWeixin({ userId, toUser: fromUser, text: '还没有配置自定义API，请先使用 #配置API 来设置', contextToken, config: account, disableSplit: true })
+      return
+    }
+    currentConfig.enabled = true
+    saveUserApiConfig(userId, currentConfig)
+    await sendToWeixin({ userId, toUser: fromUser, text: '已切换为使用自定义API', contextToken, config: account, disableSplit: true })
+    return
+  }
+  
+  // 命令7: #配置API
+  if (cmd.startsWith('配置API')) {
+    // 配置格式: #配置API [URL] [KEY] [MODEL]
+    const rest = cmd.replace(/^配置API\s*/, '').trim()
+    if (!rest) {
+      const helpText = '请使用以下格式配置API：\n\n#配置API [API地址] [密钥] [模型名]\n\n例如：\n#配置API https://api.example.com/v1/chat/completions sk-xxxxxxx deepseek-v4-pro'
+      await sendToWeixin({ userId, toUser: fromUser, text: helpText, contextToken, config: account, disableSplit: true })
+      return
+    }
+    
+    // 尝试解析三个参数
+    // 简单的空格分割，忽略多余空格
+    const parts = rest.split(/\s+/).filter(s => s.trim())
+    if (parts.length < 3) {
+      await sendToWeixin({ userId, toUser: fromUser, text: '参数不足，请按格式输入：\n#配置API [URL] [KEY] [MODEL]', contextToken, config: account, disableSplit: true })
+      return
+    }
+    
+    const url = parts[0].trim()
+    const key = parts[1].trim()
+    const model = parts[2].trim()
+    
+    // 保存配置
+    let currentConfig = loadUserApiConfig(userId) || { enabled: false, apis: [] }
+    currentConfig.apis = [{ url, key, model }] // 暂时只支持单个API
+    currentConfig.enabled = true // 配置完默认启用
+    saveUserApiConfig(userId, currentConfig)
+    
+    const successText = '✅ API配置成功！\n\n已保存配置：\nURL: ' + url + '\n模型: ' + model + '\n\n当前已切换为自定义API模式'
+    await sendToWeixin({ userId, toUser: fromUser, text: successText, contextToken, config: account, disableSplit: true })
+    return
+  }
+  
+  // 命令8: #我的API
+  if (cmd === '我的API') {
+    const currentConfig = loadUserApiConfig(userId)
+    if (!currentConfig || !currentConfig.apis || currentConfig.apis.length === 0) {
+      await sendToWeixin({ userId, toUser: fromUser, text: '还没有配置自定义API', contextToken, config: account, disableSplit: true })
+      return
+    }
+    let apiText = '📋 我的API配置\n\n'
+    apiText += `模式: ${currentConfig.enabled ? '🟢 自定义API' : '🔴 官方API'}\n\n`
+    for (let i = 0; i < currentConfig.apis.length; i++) {
+      const api = currentConfig.apis[i]
+      apiText += `${i + 1}. ${api.url}\n   模型: ${api.model}\n`
+    }
+    await sendToWeixin({ userId, toUser: fromUser, text: apiText, contextToken, config: account, disableSplit: true })
+    return
+  }
+  
   // 未知命令
-  await sendToWeixin({ userId, toUser: fromUser, text: '未知命令，可用命令：\n\n#清除记忆\n#更改人设 [人设内容]\n#当前人设\n#我的信息', contextToken, config: account, disableSplit: true })
+  const helpText = '可用命令：\n\n#清除记忆\n#更改人设 [人设内容]\n#当前人设\n#我的信息\n#配置API [URL] [KEY] [MODEL]\n#我的API\n#切换官方\n#切换自定义'
+  await sendToWeixin({ userId, toUser: fromUser, text: helpText, contextToken, config: account, disableSplit: true })
 }
 
 // 处理合并后的消息
