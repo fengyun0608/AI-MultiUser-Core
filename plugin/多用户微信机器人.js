@@ -2,6 +2,7 @@ import fs from 'node:fs'
 import path from 'node:path'
 import { randomUUID } from 'node:crypto'
 import puppeteer from 'puppeteer'
+import common from '#utils/common.js'
 
 const TEMP_DIR = path.join(process.cwd(), 'data', 'temp', 'multiuser-wechat')
 
@@ -1304,12 +1305,12 @@ export class AI_MultiUser_Bot extends plugin {
       return true
     }
     
-    // 分成两条消息发送，避免太长
+    // 构建消息数组
+    const messages = []
+    
+    // 第一条：上半部分
     const halfIndex = Math.ceil(accounts.length / 2)
     const part1 = accounts.slice(0, halfIndex)
-    const part2 = accounts.slice(halfIndex)
-    
-    // 第一条消息
     let replyText1 = '在线机器人列表（上半部分）:\n\n'
     for (const account of part1) {
       const isRunning = accountMonitors.has(account.userId)
@@ -1318,10 +1319,11 @@ export class AI_MultiUser_Bot extends plugin {
       replyText1 += `微信ID: ${account.accountId || '未知'}\n`
       replyText1 += '---\n'
     }
-    await this.reply(replyText1)
+    messages.push(replyText1)
     
-    // 第二条消息
-    if (part2.length > 0) {
+    // 第二条：下半部分
+    if (halfIndex < accounts.length) {
+      const part2 = accounts.slice(halfIndex)
       let replyText2 = '在线机器人列表（下半部分）:\n\n'
       for (const account of part2) {
         const isRunning = accountMonitors.has(account.userId)
@@ -1330,8 +1332,12 @@ export class AI_MultiUser_Bot extends plugin {
         replyText2 += `微信ID: ${account.accountId || '未知'}\n`
         replyText2 += '---\n'
       }
-      await this.reply(replyText2)
+      messages.push(replyText2)
     }
+    
+    // 用转发消息发送
+    const forwardMsg = await common.makeForwardMsg(this.e, messages, '在线机器人列表')
+    await this.reply(forwardMsg)
     
     return true
   }
@@ -1388,8 +1394,8 @@ export class AI_MultiUser_Bot extends plugin {
   async showOnlineUsers() {
     const accounts = getAllAccounts()
     
-    let onlineText = '🟢 在线用户:\n'
-    let offlineText = '🔴 离线用户:\n'
+    let onlineText = ''
+    let offlineText = ''
     let onlineCount = 0
     let offlineCount = 0
     
@@ -1404,23 +1410,18 @@ export class AI_MultiUser_Bot extends plugin {
       }
     }
     
-    let finalReply = `📊 机器人在线情况\n\n`
-    finalReply += `🟢 在线: ${onlineCount} 人\n`
-    finalReply += `🔴 离线: ${offlineCount} 人\n\n`
+    // 构建三段消息
+    const msg1 = `📊 机器人在线情况\n\n🟢 在线: ${onlineCount} 人\n🔴 离线: ${offlineCount} 人`
+    const msg2 = onlineCount > 0 
+      ? `🟢 在线用户:\n\n${onlineText}` 
+      : '🟢 在线用户:\n\n(暂无)'
+    const msg3 = offlineCount > 0 
+      ? `🔴 离线用户:\n\n${offlineText}` 
+      : '🔴 离线用户:\n\n(暂无)'
     
-    if (onlineCount > 0) {
-      finalReply += `${onlineText}\n`
-    }
-    
-    if (offlineCount > 0) {
-      finalReply += `${offlineText}\n`
-    }
-    
-    if (accounts.length === 0) {
-      finalReply += '没有任何账号'
-    }
-    
-    await this.reply(finalReply)
+    // 用转发消息发送
+    const forwardMsg = await common.makeForwardMsg(this.e, [msg1, msg2, msg3], '机器人在线状态')
+    await this.reply(forwardMsg)
     return true
   }
   
