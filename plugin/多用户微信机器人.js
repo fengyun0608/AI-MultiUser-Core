@@ -887,41 +887,121 @@ async function processAccountMessage(userId, account, msg) {
   
   console.log('[多用户微信机器人] 最终提取的 text:', text)
   
-  if (text && text.trim() && !text.trim().startsWith('#')) {
+  if (text && text.trim()) {
     const fromUser = msg.from_user_id
     const contextToken = msg.context_token
+    const trimmedText = text.trim()
     
-    // 用户唯一标识（用userId+fromUser区分不同微信用户）
-    const userKey = `${userId}_${fromUser}`
-    
-    // 加入消息队列
-    if (!userMessageQueues.has(userKey)) {
-      userMessageQueues.set(userKey, [])
+    // 先判断是不是系统命令
+    if (trimmedText.startsWith('#') || trimmedText.startsWith('＃')) {
+      await processSystemCommand(userId, account, fromUser, contextToken, trimmedText)
+    } else {
+      // 用户唯一标识（用userId+fromUser区分不同微信用户）
+      const userKey = `${userId}_${fromUser}`
+      
+      // 加入消息队列
+      if (!userMessageQueues.has(userKey)) {
+        userMessageQueues.set(userKey, [])
+      }
+      userMessageQueues.get(userKey).push({
+        text,
+        fromUser,
+        contextToken,
+        timestamp: Date.now()
+      })
+      
+      console.log(`[多用户微信机器人] ${userKey} 消息已加入队列，当前队列长度: ${userMessageQueues.get(userKey).length}`)
+      
+      // 清除之前的计时器
+      if (userDebounceTimers.has(userKey)) {
+        clearTimeout(userDebounceTimers.get(userKey))
+      }
+      
+      // 设置新的计时器，等待一段时间后处理合并后的消息
+      const timer = setTimeout(async () => {
+        await processMergedMessages(userId, account, userKey)
+      }, MESSAGE_MERGE_WAIT_MS)
+      
+      userDebounceTimers.set(userKey, timer)
     }
-    userMessageQueues.get(userKey).push({
-      text,
-      fromUser,
-      contextToken,
-      timestamp: Date.now()
-    })
-    
-    console.log(`[多用户微信机器人] ${userKey} 消息已加入队列，当前队列长度: ${userMessageQueues.get(userKey).length}`)
-    
-    // 清除之前的计时器
-    if (userDebounceTimers.has(userKey)) {
-      clearTimeout(userDebounceTimers.get(userKey))
-    }
-    
-    // 设置新的计时器，等待一段时间后处理合并后的消息
-    const timer = setTimeout(async () => {
-      await processMergedMessages(userId, account, userKey)
-    }, MESSAGE_MERGE_WAIT_MS)
-    
-    userDebounceTimers.set(userKey, timer)
-    
   } else {
-    console.log('[多用户微信机器人] 跳过处理，text为空或为命令')
+    console.log('[多用户微信机器人] 跳过处理，text为空')
   }
+}
+
+// 处理微信系统命令
+async function processSystemCommand(userId, account, fromUser, contextToken, commandText) {
+  const cmd = commandText.replace(/^[#＃]/, '').trim()
+  console.log(`[多用户微信机器人] 处理系统命令: ${cmd}`)
+  
+  // 命令1: #清除记忆
+  if (cmd.startsWith('清除记忆')) {
+    clearMemory(userId)
+    await sendToWeixin({ userId, toUser: fromUser, text: '聊天记忆已清除', contextToken, config: account })
+    return
+  }
+  
+  // 命令2: #更改人设 xxxx
+  if (cmd.startsWith('更改人设')) {
+    const newPersona = cmd.replace(/^更改人设\s*/, '').trim()
+    if (newPersona) {
+      const personaDir = path.join(getAccountDir(userId), 'persona.md')
+      fs.writeFileSync(personaDir, newPersona, 'utf-8')
+      await sendToWeixin({ userId, toUser: fromUser, text: '人设已更新', contextToken, config: account })
+    } else {
+      await sendToWeixin({ userId, toUser: fromUser, text: '请在命令后加上人设内容，例如：#更改人设 你是一个温柔的女孩', contextToken, config: account })
+    }
+    return
+  }
+  
+  // 命令3: #当前人设
+  if (cmd === '当前人设') {
+    const personaDir = path.join(getAccountDir(userId), 'persona.md')
+    let personaText = ''
+    if (fs.existsSync(personaDir)) {
+      personaText = fs.readFileSync(personaDir, 'utf-8')
+    }
+    if (personaText.trim()) {
+      await sendToWeixin({ userId, toUser: fromUser, text: `当前人设:\n\n${personaText}`, contextToken, config: account })
+    } else {
+      await sendToWeixin({ userId, toUser: fromUser, text: '还没有设置人设，请使用 #更改人设 来设置', contextToken, config: account })
+    }
+    return
+  }
+  
+  // 命令4: #我的信息
+  if (cmd === '我的信息') {
+    const currentAccount = loadAccount(userId)
+    const chatMemory = loadMemory(userId)
+    const memoriesDir = getMemoriesDir(userId)
+    let memoryFilesCount = 0
+    if (fs.existsSync(memoriesDir)) {
+      const files = fs.readdirSync(memoriesDir).filter(f => f.endsWith('.json'))
+      memoryFilesCount = files.length
+    }
+    
+    let infoText = '📋 我的信息\n\n'
+    infoText += `QQ ID: ${userId}\n`
+    infoText += `微信 ID: ${currentAccount?.accountId || '未知'}\n`
+    infoText += `状态: ${accountMonitors.has(userId) ? '🟢 运行中' : '🔴 已停止'}\n`
+    infoText += `聊天记录数: ${chatMemory.length}\n`
+    infoText += `记忆文件数: ${memoryFilesCount}\n`
+    
+    if (currentAccount?.createdAt) {
+      const date = new Date(currentAccount.createdAt)
+      infoText += `注册时间: ${date.toLocaleString('zh-CN')}\n`
+    }
+    if (currentAccount?.lastActiveAt) {
+      const date = new Date(currentAccount.lastActiveAt)
+      infoText += `最后活跃: ${date.toLocaleString('zh-CN')}\n`
+    }
+    
+    await sendToWeixin({ userId, toUser: fromUser, text: infoText, contextToken, config: account })
+    return
+  }
+  
+  // 未知命令
+  await sendToWeixin({ userId, toUser: fromUser, text: '未知命令，可用命令：\n\n#清除记忆\n#更改人设 [人设内容]\n#当前人设\n#我的信息', contextToken, config: account })
 }
 
 // 处理合并后的消息
