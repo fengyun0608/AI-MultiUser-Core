@@ -36,6 +36,7 @@ async function screenshotUrl(url, filepath) {
 const DATA_DIR = path.join(process.cwd(), 'core', 'AI-MultiUser-Core', 'accounts')
 const MASTER_FILE = path.join(process.cwd(), 'core', 'AI-MultiUser-Core', 'masters.json')
 const DEFAULT_PERSONA_FILE = path.join(process.cwd(), 'core', 'AI-MultiUser-Core', 'default-persona.md')
+const AI_MULTIUSER_DIR = path.join(process.cwd(), 'core', 'AI-MultiUser-Core')
 const FIXED_BASE_URL = 'https://ilinkai.weixin.qq.com'
 const DEFAULT_ILINK_BOT_TYPE = '3'
 const QR_LONG_POLL_TIMEOUT_MS = 35000
@@ -72,7 +73,6 @@ const NAME_BINDING_FILE = path.join(AI_MULTIUSER_DIR, 'name-bindings.json')
 let currentApiIndex = 0
 
 // 自动发消息的定时器
-let autoMsgTimer = null
 let autoMsgTimeout = null
 
 // 加载名称绑定
@@ -1572,9 +1572,6 @@ async function processMergedMessages(userId, account, userKey) {
   const history = getChatHistoryString(userId)
   const recentMemories = getRecentMemoriesString(userId, 2)
   const beijingTime = getBeijingTime()
-  
-  // 检查人设是否要求使用动作描述
-  const allowActions = /动作|（|）|\(|\)/.test(personaText)
   
   const prompt = `你现在就是这个人，完全按照人设说话，别让人看出你是AI：
 
