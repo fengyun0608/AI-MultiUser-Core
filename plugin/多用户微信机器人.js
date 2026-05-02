@@ -1695,9 +1695,10 @@ ${mergedText}
     console.log('[多用户微信机器人] 清理后回复:', finalResponse)
     console.log('[多用户微信机器人] 是否保存记忆:', isImportant)
     
-    // 如果清理后回复是空的，直接使用原AI回复
+    // 如果清理后回复是空的，使用清理标签后的纯文本（去掉[重要:xx]）
     if (!finalResponse || !finalResponse.trim()) {
-      finalResponse = aiResponse.trim()
+      // 从原 AI 回复去掉 [重要:xx] 标签
+      finalResponse = aiResponse.replace(/\[重要\s*:\s*(true|false)\]/i, '').trim()
     }
     
     addChatLog(userId, 'assistant', finalResponse)
