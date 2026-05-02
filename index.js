@@ -1,9 +1,8 @@
 import fs from 'node:fs'
 import path from 'node:path'
-import plugin from 'yunzai'
 
 // 导入模块化功能
-import { DATA_DIR, TEMP_DIR, DEFAULT_PERSONA_FILE, getBeijingTime } from './lib/config.js'
+import { DATA_DIR, TEMP_DIR, DEFAULT_PERSONA_FILE, getBeijingTime, getPaused, setPaused } from './lib/config.js'
 import {
   loadUserAccountConfig,
   saveUserAccountConfig,
@@ -51,6 +50,14 @@ export class AIWeixinMultiUser extends plugin {
         {
           reg: '^#微信账号列表',
           fnc: 'handleListAccounts'
+        },
+        {
+          reg: '^#暂停(微信机器人|机器人)?',
+          fnc: 'handlePause'
+        },
+        {
+          reg: '^#恢复(微信机器人|机器人)?',
+          fnc: 'handleResume'
         },
         {
           reg: '',
@@ -123,6 +130,14 @@ export class AIWeixinMultiUser extends plugin {
   }
   
   async handleListAccounts(e) {
+    await processQQCommand(e, this, e.msg)
+  }
+  
+  async handlePause(e) {
+    await processQQCommand(e, this, e.msg)
+  }
+  
+  async handleResume(e) {
     await processQQCommand(e, this, e.msg)
   }
   
