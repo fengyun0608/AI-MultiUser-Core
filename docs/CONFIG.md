@@ -9,6 +9,7 @@
 - [项目信息](#项目信息)
 - [插件配置](#插件配置)
 - [主人配置](#主人配置)
+- [名称绑定配置](#名称绑定配置)
 - [用户配置](#用户配置)
 - [人设配置](#人设配置)
 
@@ -34,9 +35,10 @@
 
 | 配置项 | 类型 | 默认值 | 说明 |
 |--------|------|--------|------|
-| `apiUrl` | string | `https://api.minewuer.com/v1/chat/completions` | LLM API 地址 |
-| `apiKey` | string | - | API 密钥（必填） |
-| `model` | string | `deepseek-v4-pro-chat` | 模型名称 |
+| `apis` | array | - | 多API配置数组 |
+| `apis[0].url` | string | - | API地址 |
+| `apis[0].key` | string | - | API密钥 |
+| `apis[0].model` | string | - | 模型名称 |
 | `temperature` | number | 0.7 | 温度参数，控制回复创造性 |
 | `maxTokens` | number | 1000 | 最大 Token 数 |
 
@@ -44,9 +46,18 @@
 
 ```json
 {
-  "apiUrl": "https://api.example.com/v1/chat/completions",
-  "apiKey": "sk-xxx",
-  "model": "deepseek-v4-pro-chat",
+  "apis": [
+    {
+      "url": "https://api.example.com/v1/chat/completions",
+      "key": "sk-xxx",
+      "model": "deepseek-v4-pro-chat"
+    },
+    {
+      "url": "https://api.another.com/v1/chat/completions",
+      "key": "sk-yyy",
+      "model": "deepseek-v4-pro"
+    }
+  ],
   "temperature": 0.7,
   "maxTokens": 1000
 }
@@ -57,6 +68,7 @@
 - **此配置文件仅由管理员修改**
 - `apiKey` 为敏感信息，请勿泄露
 - 修改后需要重启机器人生效
+- 多API配置支持自动轮询，避免限流
 
 ---
 
@@ -87,6 +99,33 @@
 
 ---
 
+## 名称绑定配置
+
+### 文件位置
+
+`core/AI-MultiUser-Core/name-bindings.json`
+
+### 配置说明
+
+此文件存储名称与QQ号的绑定关系，支持通过名称登录微信。
+
+### 配置示例
+
+```json
+{
+  "我的专属机器人": "123456789",
+  "小可爱": "987654321"
+}
+```
+
+### ⚠️ 注意事项
+
+- **此文件由系统自动生成，无需手动编辑**
+- 使用 `#微信机器人登录 名称` 命令时自动生成
+- 使用 `#查询用户` 命令可查看绑定关系
+
+---
+
 ## 用户配置
 
 ### 文件位置
@@ -103,21 +142,28 @@
 | `baseUrl` | string | 微信 API 地址 |
 | `userIdFromWeixin` | string | 微信用户 ID |
 | `createdAt` | number | 创建时间戳 |
+| `lastActiveAt` | number | 最后活跃时间戳 |
 | `enabled` | boolean | 是否启用 |
 | `get_updates_buf` | string | 更新缓冲数据 |
 
-### 配置示例
+### 用户API配置
+
+用户可以在微信端配置自定义API，配置文件位置：
+
+`core/AI-MultiUser-Core/accounts/user-XXX/api-config.json`
+
+用户API配置示例：
 
 ```json
 {
-  "userId": "123456789",
-  "accountId": "wxid_xxx@im.bot",
-  "token": "xxx",
-  "baseUrl": "https://ilinkai.weixin.qq.com",
-  "userIdFromWeixin": "xxx",
-  "createdAt": 1234567890,
-  "enabled": true,
-  "get_updates_buf": ""
+  "enabled": false,
+  "apis": [
+    {
+      "url": "https://api.user.com/v1/chat/completions",
+      "key": "sk-user-xxx",
+      "model": "deepseek-v4-pro"
+    }
+  ]
 }
 ```
 
@@ -126,6 +172,7 @@
 - **此文件由系统自动生成，无需手动编辑**
 - `token` 为敏感信息，请勿泄露
 - 修改可能导致登录失效
+- 用户API配置在微信端使用 `#配置API` 命令生成
 
 ---
 
@@ -161,11 +208,7 @@
 
 ### 动作描述说明
 
-默认情况下，AI不会使用动作描述（如 `(笑)`、`(看向你)` 等）。
-
-如果需要AI使用动作描述，可以在人设文件中添加相关要求，或包含括号内容。
-
-系统会自动检测人设中是否包含动作描述要求，如果包含，则允许AI使用动作描述。
+现在系统会自动清理所有括号内容，避免AI使用不自然的动作描述。
 
 ### ⚠️ 注意事项
 

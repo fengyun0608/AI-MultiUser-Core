@@ -11,7 +11,7 @@
     <img src="https://img.shields.io/badge/MIT_License-007EC6?style=for-the-badge&logo=mit&logoColor=white" alt="MIT License">
   </a>
   <a href="https://github.com/fengyun0608/AI-MultiUser-Core">
-    <img src="https://img.shields.io/badge/Version-12.1.0-00ADD8?style=for-the-badge" alt="Version">
+    <img src="https://img.shields.io/badge/Version-13.0.0-00ADD8?style=for-the-badge" alt="Version">
   </a>
   <a href="https://github.com/fengyun0608/AI-MultiUser-Core/stargazers">
     <img src="https://img.shields.io/github/stars/fengyun0608/AI-MultiUser-Core?style=for-the-badge&logo=github" alt="GitHub stars">
@@ -50,7 +50,7 @@
 ## 📋 项目信息
 
 - **项目名称**: AI-MultiUser-Core
-- **版本**: 12.1.0
+- **版本**: 13.0.0
 - **开源协议**: MIT License
 - **项目路径**: core/AI-MultiUser-Core
 - **依赖项目**: [XRK-AGT](https://github.com/sunflowermm/XRK-AGT)
@@ -86,6 +86,7 @@ AI-MultiUser-Core/
 │
 ├── default-persona.md               # 默认人设模板（新用户复制此文件）
 ├── plugin-config.json               # 插件配置文件（API配置，管理员修改）
+├── name-bindings.json               # 名称与QQ号绑定配置
 ├── masters.json                   # 主人配置文件（QQ号列表）
 ├── README.md                    # 本说明文件
 ├── CHANGELOG.md                # [更新日志](CHANGELOG.md)
@@ -154,7 +155,15 @@ AI-MultiUser-Core/
 - **简单标题生成** - 自动生成简洁的记忆标题
 - **北京时间记录** - 每个记忆都带准确的北京时间戳
 - **记忆回顾提示** - AI根据记忆更好地理解上下文和产生情绪
-- **清除记忆功能** - #清除记忆 同时删除聊天记录和所有记忆文件
+- **清除记忆功能** - `#清除记忆` 同时删除聊天记录和所有记忆文件
+
+### 🎉 新增特色功能
+
+- **AI主动发消息** - 支持开启AI主动发消息，两小时内随机时间主动和你聊天
+- **名称登录** - 支持通过名称登录微信，自动绑定当前QQ
+- **用户查询** - 支持查询名称与QQ号的绑定关系
+- **灵活命令** - 所有命令支持大小写不敏感和灵活空格
+- **对话式配置** - API配置改为对话式，更简单易用
 
 ---
 
@@ -166,16 +175,47 @@ AI-MultiUser-Core/
 |------|------|
 | `#登录微信AI` | 开始微信登录流程，获取二维码图片 |
 | `#更改人设 人设内容` | 修改自己的人设（需已登录并运行，支持多行） |
+| `#当前人设` | 查看当前人设 |
 | `#清除记忆` | 清除自己的聊天记忆（需已登录） |
+| `#我的信息` | 查看个人信息和统计数据 |
+
+### 📱 微信端命令
+
+| 命令 | 说明 |
+|------|------|
+| `#清除记忆` | 清除聊天记忆 |
+| `#更改人设 人设内容` | 修改人设 |
+| `#当前人设` | 查看当前人设 |
+| `#我的信息` | 查看个人信息 |
+| `#配置API` | 配置自定义API（对话式） |
+| `#我的API` | 查看API配置 |
+| `#切换官方` | 切换到官方API |
+| `#切换自定义` | 切换到自定义API |
+| `#开启AI主动发送消息` | 开启AI主动发消息 |
+| `#关闭AI主动发送消息` | 关闭AI主动发消息 |
 
 ### 👑 主人命令（仅限 masters.json 中配置的QQ号）
 
 | 命令 | 说明 |
 |------|------|
 | `#微信机器人在线列表` | 查看所有已登录用户和运行状态 |
+| `#在线用户` | 查看在线和离线用户 |
 | `#停止机器人` | 停止机器人 |
 | `#启动机器人` | 启动机器人 |
-| `#删除机器人` | 删除账号所有数据 |
+| `#删除机器人` | 删除账号数据 |
+| `#关于` | 查看项目信息 |
+| `#推广` | 查看推广文案 |
+| `#站点状态` | 查看API站点状态 |
+| `#帮助多用户` | 查看帮助信息 |
+
+### 🎉 新增管理员命令
+
+| 命令 | 说明 |
+|------|------|
+| `#微信机器人登录 名称` | 通过名称登录微信，自动绑定当前QQ |
+| `#查询用户 <名称/QQ号>` | 查询用户绑定关系 |
+
+---
 
 详细命令说明查看 [使用说明文档](docs/USAGE.md)
 
@@ -185,10 +225,10 @@ AI-MultiUser-Core/
 
 ### 普通用户使用
 
-1. 在QQ群中发送 `#登录微信AI`
+1. 在QQ群中发送 `#登录微信AI`（或 `#微信机器人登录 <名称>`）
 2. 收到二维码图片，用微信扫码登录
 3. 登录成功后自动启动机器人
-4. 在QQ群中使用 `#更改人设` 命令修改人设（可选）
+4. 在QQ群中使用 `#更改人设 新的人设内容` 修改人设（可选）
 5. 在微信中和机器人对话（体验真人聊天节奏）
 
 ### 主人管理
@@ -211,6 +251,8 @@ AI-MultiUser-Core/
 - ✅ 人设是最高优先级，比什么都重要
 - ✅ 用户3秒内多条消息会合并处理
 - ✅ 多API自动轮询，避免429限流
+- ✅ 所有命令支持大小写不敏感和灵活空格
+- ✅ 支持名称绑定和通过名称登录微信
 
 ## 🛠️ 系统架构说明
 
@@ -252,15 +294,20 @@ AI-MultiUser-Core/
 本项目持续更新，感谢大家的支持！
 
 ### GitHub 统计
+
 [![GitHub stars](https://img.shields.io/github/stars/fengyun0608/AI-MultiUser-Core?style=social)](https://github.com/fengyun0608/AI-MultiUser-Core/stargazers)
 [![GitHub downloads](https://img.shields.io/github/downloads/fengyun0608/AI-MultiUser-Core/total?style=flat-square)](https://github.com/fengyun0608/AI-MultiUser-Core/releases)
 
 ### 功能特性
+
 - ✅ **多用户支持** - 无限用户独立登录
 - 🧠 **智能记忆** - 长期记忆保存
 - 🎭 **自定义人设** - 任意角色设定
 - 💬 **真人体验** - 多段发送+打字延迟
 - 🔒 **数据隔离** - 用户数据完全独立
+- 🎉 **主动发消息** - AI主动和你聊天
+- 🔍 **名称登录** - 支持通过名称登录微信
+- 📱 **灵活命令** - 大小写不敏感和灵活空格支持
 
 ---
 

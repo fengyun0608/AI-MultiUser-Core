@@ -57,41 +57,40 @@ const userDebounceTimers = new Map()
 // 消息合并等待时间（毫秒）
 const MESSAGE_MERGE_WAIT_MS = 3000
 
-// 限流控制：更宽松的设置
-let apiRequestTimes = []
-const MAX_REQUESTS_PER_MINUTE = 240 // 3个API，每个80次
-const MIN_INTERVAL_PER_USER = 3000 // 同一个用户至少间隔3秒
+// API配置状态管理：{ [userId]: { step: 'url'|'key'|'model', data: { url?: string, key?: string } } }
+const apiConfigStates = new Map()
 
-// 记录每个用户最后请求时间
-const userLastRequestTimes = new Map()
+// 自动发消息配置
+const AUTO_MSG_ENABLED_KEY = 'autoMsgEnabled'
+const AUTO_MSG_LAST_ACTIVE_KEY = 'autoMsgLastActive'
+const AUTO_MSG_LAST_SENT_KEY = 'autoMsgLastSent'
+
+// 名称与QQ绑定配置
+const NAME_BINDING_FILE = path.join(AI_MULTIUSER_DIR, 'name-bindings.json')
 
 // API轮询索引
 let currentApiIndex = 0
 
-function checkRateLimit(userId) {
-  // 先检查用户最小间隔
-  const now = Date.now()
-  const lastTime = userLastRequestTimes.get(userId)
-  if (lastTime && now - lastTime < MIN_INTERVAL_PER_USER) {
-    console.log(`[多用户微信机器人] ${userId} 请求太快，跳过`)
-    return false
+// 自动发消息的定时器
+let autoMsgTimer = null
+let autoMsgTimeout = null
+
+// 加载名称绑定
+function loadNameBindings() {
+  if (!fs.existsSync(NAME_BINDING_FILE)) {
+    return {}
   }
-  
-  // 再检查全局限流
-  const oneMinuteAgo = now - 60 * 1000
-  apiRequestTimes = apiRequestTimes.filter(t => t > oneMinuteAgo)
-  if (apiRequestTimes.length >= MAX_REQUESTS_PER_MINUTE) {
-    console.log('[多用户微信机器人] 全局限流已达上限，跳过')
-    return false
+  try {
+    const content = fs.readFileSync(NAME_BINDING_FILE, 'utf8')
+    return JSON.parse(content)
+  } catch (e) {
+    return {}
   }
-  
-  return true
 }
 
-function addRateLimit(userId) {
-  const now = Date.now()
-  userLastRequestTimes.set(userId, now)
-  apiRequestTimes.push(now)
+// 保存名称绑定
+function saveNameBindings(bindings) {
+  fs.writeFileSync(NAME_BINDING_FILE, JSON.stringify(bindings, null, 2))
 }
 
 function randomWechatUin() {
@@ -273,13 +272,16 @@ async function pollQRStatus(baseUrl, qrcode) {
   }
 }
 
-async function startWeixinLogin(userId, pluginInstance) {
+async function startWeixinLogin(userId, pluginInstance, messageId) {
   const sessionKey = userId
   
   purgeExpiredLogins()
   
   const existing = activeLogins.get(sessionKey)
   if (existing && isLoginFresh(existing)) {
+    // 更新 messageId
+    existing.messageId = messageId
+    activeLogins.set(sessionKey, existing)
     return { status: 'exists', qrcodeUrl: existing.qrcodeUrl, message: '二维码已就绪，请使用微信扫描' }
   }
   
@@ -291,6 +293,7 @@ async function startWeixinLogin(userId, pluginInstance) {
       userId,
       qrcode: qrResponse.qrcode, qrcodeUrl: qrResponse.qrcode_img_content, startedAt: Date.now(),
       currentApiBaseUrl: FIXED_BASE_URL, status: 'wait', pluginInstance,
+      messageId,
     }
     
     activeLogins.set(sessionKey, login)
@@ -338,8 +341,13 @@ async function pollQRCodeLoop(sessionKey) {
         case 'scaned':
           console.log('[多用户微信机器人] 已扫码，等待确认')
           try {
-            if (login.pluginInstance) {
-              await login.pluginInstance.reply('已扫码，请在微信中确认登录！')
+            if (login.pluginInstance && login.messageId) {
+              await login.pluginInstance.reply([
+                segment.reply(login.messageId),
+                segment.at(login.userId),
+                ' ',
+                '已扫码，请在微信中确认登录！'
+              ])
             }
           } catch (e) {}
           await new Promise(r => setTimeout(r, 1000))
@@ -355,8 +363,13 @@ async function pollQRCodeLoop(sessionKey) {
         case 'expired':
           console.log('[多用户微信机器人] 二维码已过期')
           try {
-            if (login.pluginInstance) {
-              await login.pluginInstance.reply('二维码已过期，请重新发送 #登录微信AI')
+            if (login.pluginInstance && login.messageId) {
+              await login.pluginInstance.reply([
+                segment.reply(login.messageId),
+                segment.at(login.userId),
+                ' ',
+                '二维码已过期，请重新发送 #登录微信AI'
+              ])
             }
           } catch (e) {}
           activeLogins.delete(sessionKey)
@@ -366,8 +379,13 @@ async function pollQRCodeLoop(sessionKey) {
           if (!statusResponse.ilink_bot_id) {
             console.error('[多用户微信机器人] 登录成功但缺少 ilink_bot_id')
             try {
-              if (login.pluginInstance) {
-                await login.pluginInstance.reply('登录失败：未获取到账号信息')
+              if (login.pluginInstance && login.messageId) {
+                await login.pluginInstance.reply([
+                  segment.reply(login.messageId),
+                  segment.at(login.userId),
+                  ' ',
+                  '登录失败：未获取到账号信息'
+                ])
               }
             } catch (e) {}
             activeLogins.delete(sessionKey)
@@ -390,11 +408,16 @@ async function pollQRCodeLoop(sessionKey) {
           activeLogins.delete(sessionKey)
           
           try {
-            if (login.pluginInstance) {
+            if (login.pluginInstance && login.messageId) {
               let replyMsg = '✅ 登录成功！微信机器人已启动！\n\n'
               replyMsg += '💡 提示：现在可以发送 #更改人设 来设置你的专属人设哦！\n'
               replyMsg += '（也可以发送 #当前人设 查看当前人设）'
-              await login.pluginInstance.reply(replyMsg)
+              await login.pluginInstance.reply([
+                segment.reply(login.messageId),
+                segment.at(login.userId),
+                ' ',
+                replyMsg
+              ])
             }
           } catch (e) {}
           
@@ -695,6 +718,207 @@ function getRecentMemoriesString(userId, limit = 3) {
   return lines.join('\n')
 }
 
+// 自动发消息的辅助函数
+function getUserAutoMsgConfig(userId) {
+  const account = loadAccount(userId)
+  return {
+    enabled: account?.[AUTO_MSG_ENABLED_KEY] || false,
+    lastActive: account?.[AUTO_MSG_LAST_ACTIVE_KEY] || 0,
+    lastSent: account?.[AUTO_MSG_LAST_SENT_KEY] || 0,
+    lastChatFromUser: account?.lastChatFromUser,
+  }
+}
+
+function setUserAutoMsgConfig(userId, updates) {
+  const account = loadAccount(userId) || {}
+  const newAccount = {
+    ...account,
+    ...updates,
+  }
+  saveAccount(userId, newAccount)
+}
+
+function updateUserLastActive(userId) {
+  setUserAutoMsgConfig(userId, { [AUTO_MSG_LAST_ACTIVE_KEY]: Date.now() })
+}
+
+// 格式化时间差（比如：30分钟、1小时、2小时30分）
+function formatTimeDiff(ms) {
+  const minutes = Math.floor(ms / 60000)
+  const hours = Math.floor(minutes / 60)
+  const remainingMinutes = minutes % 60
+  
+  if (hours > 0) {
+    if (remainingMinutes > 0) {
+      return `${hours}小时${remainingMinutes}分`
+    }
+    return `${hours}小时`
+  }
+  return `${minutes}分钟`
+}
+
+// 生成随机分钟（15-45分钟）
+function getRandomMinutes() {
+  return 15 + Math.floor(Math.random() * 31) // 15到45分钟
+}
+
+// 生成主动发的消息
+async function generateAutoMessage(userId, account) {
+  try {
+    const config = getUserAutoMsgConfig(userId)
+    const now = Date.now()
+    const idleTime = now - (config.lastActive || now)
+    const idleTimeStr = formatTimeDiff(idleTime)
+    
+    const personaText = loadPersona(userId)
+    const history = getChatHistoryString(userId)
+    const recentMemories = getRecentMemoriesString(userId, 2)
+    const beijingTime = getBeijingTime()
+    
+    const prompt = `现在请主动和用户说话！
+
+【你的人设】
+${personaText}
+
+【现在的时间】${beijingTime.full}
+
+【用户空闲时间】${idleTimeStr}没理你了
+
+${recentMemories ? recentMemories : ''}
+
+【刚才的聊天记录】
+${history || ''}
+
+---
+
+请完全按照人设，主动和用户说句话（自然口语，像真人一样），不要加任何括号，不要加任何格式，直接说内容！`
+    
+    const aiResponse = await callAI(prompt, userId)
+    
+    if (!aiResponse) return null
+    
+    // 清理括号
+    let finalResponse = aiResponse.trim()
+    finalResponse = finalResponse.replace(/（[^）]*）/g, '')
+    finalResponse = finalResponse.replace(/\([^)]*\)/g, '')
+    finalResponse = finalResponse.replace(/\[[^\]]*\]/g, '')
+    finalResponse = finalResponse.replace(/<[^>]*>/g, '')
+    finalResponse = finalResponse.replace(/\n\s*\n/g, '\n').trim()
+    
+    return finalResponse || null
+  } catch (e) {
+    console.error(`[多用户微信机器人] 生成消息出错`, e)
+    return null
+  }
+}
+
+// 给用户发送主动消息
+async function sendAutoMessages() {
+  console.log('[多用户微信机器人] 开始给用户发送主动消息')
+  
+  // 获取所有开启的用户
+  const accounts = getAllAccounts()
+  const enabledAccounts = accounts.filter(a => a.enabled && a[AUTO_MSG_ENABLED_KEY] && a.lastChatFromUser)
+  
+  if (enabledAccounts.length === 0) {
+    console.log('[多用户微信机器人] 没有开启自动发消息的用户')
+    scheduleNextAutoMessage()
+    return
+  }
+  
+  // 随机选1-2个用户
+  const numToSelect = Math.min(enabledAccounts.length, 1 + Math.floor(Math.random() * 2))
+  const selected = []
+  const used = new Set()
+  
+  while (selected.length < numToSelect) {
+    const idx = Math.floor(Math.random() * enabledAccounts.length)
+    if (!used.has(idx)) {
+      used.add(idx)
+      selected.push(enabledAccounts[idx])
+    }
+  }
+  
+  console.log(`[多用户微信机器人] 选中了 ${selected.length} 个用户`)
+  
+  for (const account of selected) {
+    try {
+      const userId = account.userId
+      const message = await generateAutoMessage(userId, account)
+      
+      if (message) {
+        const config = getUserAutoMsgConfig(userId)
+        
+        console.log(`[多用户微信机器人] 给用户${userId}主动发消息: ${message}`)
+        
+        // 发送
+        await sendToWeixin({
+          userId,
+          toUser: config.lastChatFromUser,
+          text: message,
+          contextToken: null,
+          config: account,
+        })
+        
+        // 更新lastSent
+        setUserAutoMsgConfig(userId, { [AUTO_MSG_LAST_SENT_KEY]: Date.now() })
+      }
+    } catch (e) {
+      console.error(`[多用户微信机器人] 发送消息出错`, e)
+    }
+  }
+  
+  // 安排下次
+  scheduleNextAutoMessage()
+}
+
+// 安排下次自动发消息
+function scheduleNextAutoMessage() {
+  if (autoMsgTimeout) {
+    clearTimeout(autoMsgTimeout)
+  }
+  
+  // 计算下次两小时后的时间
+  const now = new Date()
+  const nextHour = now.getHours() + 2
+  const targetHour = nextHour % 24
+  const targetMinutes = getRandomMinutes() // 随机15-45分钟
+  
+  const targetTime = new Date(now)
+  targetTime.setHours(targetHour)
+  targetTime.setMinutes(targetMinutes)
+  targetTime.setSeconds(0)
+  targetTime.setMilliseconds(0)
+  
+  // 如果已经过了，加一天
+  if (targetTime <= now) {
+    targetTime.setDate(targetTime.getDate() + 1)
+  }
+  
+  const delay = targetTime - now
+  
+  console.log(`[多用户微信机器人] 下次自动发消息时间: ${targetTime.toLocaleString()}`)
+  
+  autoMsgTimeout = setTimeout(() => {
+    sendAutoMessages().catch(e => console.error('[多用户微信机器人] 发送主动消息出错', e))
+  }, delay)
+}
+
+// 启动自动发消息
+function startAutoMsgTimer() {
+  console.log('[多用户微信机器人] 启动自动发消息功能')
+  scheduleNextAutoMessage()
+}
+
+// 停止自动发消息
+function stopAutoMsgTimer() {
+  if (autoMsgTimeout) {
+    clearTimeout(autoMsgTimeout)
+    autoMsgTimeout = null
+  }
+  console.log('[多用户微信机器人] 停止自动发消息功能')
+}
+
 function generateSimpleTitle(userText, aiText) {
   const combined = (userText + ' ' + aiText).trim()
   if (combined.length <= 20) return combined
@@ -788,29 +1012,33 @@ function loadPluginConfig() {
 }
 
 async function callAI(prompt, userId) {
-  // 先检查限流
-  if (!checkRateLimit(userId)) {
-    return null
-  }
-  
   // 先看用户有没有配置自定义API且启用
   const userApiConfig = loadUserApiConfig(userId)
   let useUserApi = false
   let apisToUse = []
   
+  const officialConfig = loadPluginConfig()
+  const officialApiUrls = (officialConfig?.apis || []).map(api => api.url)
+  
   if (userApiConfig && userApiConfig.enabled && userApiConfig.apis && userApiConfig.apis.length > 0) {
+    // 检查用户自定义API是否与官方API冲突
+    const hasConflict = userApiConfig.apis.some(api => officialApiUrls.includes(api.url))
+    if (hasConflict) {
+      console.error('[多用户微信机器人] 用户自定义API与官方API冲突')
+      return '__CONFLICT__'
+    }
+    
     // 使用用户自定义的API
     useUserApi = true
     apisToUse = userApiConfig.apis
     console.log(`[多用户微信机器人] 用户 ${userId} 使用自定义API`)
   } else {
     // 使用官方配置的API
-    const config = loadPluginConfig()
-    if (!config || !config.apis || config.apis.length === 0) {
+    if (!officialConfig || !officialConfig.apis || officialConfig.apis.length === 0) {
       console.error('[多用户微信机器人] 插件配置未找到')
       return null
     }
-    apisToUse = config.apis
+    apisToUse = officialConfig.apis
   }
 
   // 获取可用的API（优先用缓存，没有再检查）
@@ -870,18 +1098,17 @@ async function callAI(prompt, userId) {
         const data = await response.json()
         let result = data.choices?.[0]?.message?.content
         
-        // 严格检查：如果结果是 {}、[]、或空字符串，视为失败
-        if (!result || !result.trim() || result === '{}' || result === '[]') {
-          console.warn(`[多用户微信机器人] API ${api.url} 返回无效内容:`, data)
+        // 只检查最基本的有效性
+        if (!result) {
+          console.warn(`[多用户微信机器人] API ${api.url} 返回空内容:`, data)
           // 标记这个API失败
           apiHealth.set(api.url, { ok: false, lastCheck: Date.now() })
           continue
         }
         
-        // 成功了，更新索引，记录限流
+        // 成功了，更新索引
         const originalApiIndex = apisToUse.findIndex(a => a.url === api.url)
         currentApiIndex = originalApiIndex + 1
-        addRateLimit(userId)
         console.log(`[多用户微信机器人] API ${api.url} 调用成功`)
         return result
       } else {
@@ -1032,6 +1259,17 @@ async function processAccountMessage(userId, account, msg) {
     const contextToken = msg.context_token
     const trimmedText = text.trim()
     
+    // 更新用户最后活跃时间
+    updateUserLastActive(userId)
+    // 记录最后聊天的用户
+    setUserAutoMsgConfig(userId, { lastChatFromUser: fromUser })
+    
+    // 先检查用户是否正在配置 API
+    if (apiConfigStates.has(userId)) {
+      await handleApiConfigStep(userId, account, fromUser, contextToken, trimmedText)
+      return
+    }
+    
     // 先判断是不是系统命令
     if (trimmedText.startsWith('#') || trimmedText.startsWith('＃')) {
       await processSystemCommand(userId, account, fromUser, contextToken, trimmedText)
@@ -1069,10 +1307,97 @@ async function processAccountMessage(userId, account, msg) {
   }
 }
 
+// 处理 API 配置步骤
+async function handleApiConfigStep(userId, account, fromUser, contextToken, userInput) {
+  const state = apiConfigStates.get(userId)
+  
+  if (!state) return
+  
+  // 检查是否取消配置
+  if (userInput.startsWith('#取消') || userInput.startsWith('＃取消')) {
+    apiConfigStates.delete(userId)
+    await sendToWeixin({ userId, toUser: fromUser, text: '已取消配置 API', contextToken, config: account, disableSplit: true })
+    return
+  }
+  
+  if (state.step === 'url') {
+    // 处理 URL
+    let url = userInput.trim()
+    
+    // 检查是否有 http
+    if (!url.startsWith('http')) {
+      await sendToWeixin({ userId, toUser: fromUser, text: '请输入有效的 API 地址，需要以 http 或 https 开头哦', contextToken, config: account, disableSplit: true })
+      return
+    }
+    
+    // 自动补全 URL
+    if (!url.includes('/chat/completions')) {
+      if (url.endsWith('/v1')) {
+        url = url + '/chat/completions'
+      } else if (url.endsWith('/v1/')) {
+        url = url + 'chat/completions'
+      } else if (url.endsWith('/')) {
+        url = url + 'v1/chat/completions'
+      } else {
+        url = url + '/v1/chat/completions'
+      }
+      console.log(`[多用户微信机器人] 自动补全URL为: ${url}`)
+    }
+    
+    // 检查是否与官方API冲突
+    const officialConfig = loadPluginConfig()
+    const officialApiUrls = (officialConfig?.apis || []).map(api => api.url)
+    if (officialApiUrls.includes(url)) {
+      await sendToWeixin({ userId, toUser: fromUser, text: '❌ 当前API供应商与官方冲突，请使用其他API供应商', contextToken, config: account, disableSplit: true })
+      return
+    }
+    
+    // 保存 URL，进入下一步
+    apiConfigStates.set(userId, { step: 'key', data: { url } })
+    await sendToWeixin({ userId, toUser: fromUser, text: '好的，API 地址已记录！现在请输入你的 API Key（密钥）', contextToken, config: account, disableSplit: true })
+    
+  } else if (state.step === 'key') {
+    // 处理 KEY
+    const key = userInput.trim()
+    
+    if (!key) {
+      await sendToWeixin({ userId, toUser: fromUser, text: '请输入你的 API Key', contextToken, config: account, disableSplit: true })
+      return
+    }
+    
+    // 保存 KEY，进入下一步
+    apiConfigStates.set(userId, { step: 'model', data: { ...state.data, key } })
+    await sendToWeixin({ userId, toUser: fromUser, text: '密钥已保存！最后请输入你想使用的模型名称，例如：deepseek-v4-pro、gpt-4o 等', contextToken, config: account, disableSplit: true })
+    
+  } else if (state.step === 'model') {
+    // 处理模型
+    const model = userInput.trim()
+    
+    if (!model) {
+      await sendToWeixin({ userId, toUser: fromUser, text: '请输入模型名称', contextToken, config: account, disableSplit: true })
+      return
+    }
+    
+    // 保存全部配置
+    const { url, key } = state.data
+    let currentConfig = loadUserApiConfig(userId) || { enabled: false, apis: [] }
+    currentConfig.apis = [{ url, key, model }]
+    currentConfig.enabled = true
+    saveUserApiConfig(userId, currentConfig)
+    
+    // 清除状态
+    apiConfigStates.delete(userId)
+    
+    const successText = `✅ API 配置成功！\n\n已保存配置：\n地址: ${url}\n模型: ${model}\n\n现在已切换到自定义 API 模式`
+    await sendToWeixin({ userId, toUser: fromUser, text: successText, contextToken, config: account, disableSplit: true })
+  }
+}
+
 // 处理微信系统命令
 async function processSystemCommand(userId, account, fromUser, contextToken, commandText) {
-  const cmd = commandText.replace(/^[#＃]/, '').trim()
-  console.log(`[多用户微信机器人] 处理系统命令: ${cmd}`)
+  const originalCmd = commandText.replace(/^[#＃]/, '').trim()
+  const cmd = originalCmd.toLowerCase().replace(/\s+/g, '') // 转小写并移除所有空格
+  console.log(`[多用户微信机器人] 处理系统命令: ${originalCmd}`)
   
   // 命令1: #清除记忆
   if (cmd.startsWith('清除记忆')) {
@@ -1083,7 +1408,8 @@ async function processSystemCommand(userId, account, fromUser, contextToken, com
   
   // 命令2: #更改人设 xxxx
   if (cmd.startsWith('更改人设')) {
-    const newPersona = cmd.replace(/^更改人设\s*/, '').trim()
+    // 移除命令前缀，支持任意空格
+    let newPersona = originalCmd.replace(/^[#＃]?\s*更改人设\s*/i, '').trim()
     if (newPersona) {
       const personaDir = path.join(getAccountDir(userId), 'persona.md')
       fs.writeFileSync(personaDir, newPersona, 'utf-8')
@@ -1163,54 +1489,22 @@ async function processSystemCommand(userId, account, fromUser, contextToken, com
   }
   
   // 命令7: #配置API
-  if (cmd.startsWith('配置API')) {
-    // 配置格式: #配置API [URL] [KEY] [MODEL]
-    const rest = cmd.replace(/^配置API\s*/, '').trim()
-    if (!rest) {
-      const helpText = '请使用以下格式配置API：\n\n#配置API [API地址] [密钥] [模型名]\n\n例如：\n#配置API https://api.example.com/v1/chat/completions sk-xxxxxxx deepseek-v4-pro'
-      await sendToWeixin({ userId, toUser: fromUser, text: helpText, contextToken, config: account, disableSplit: true })
-      return
-    }
-    
-    // 尝试解析三个参数
-    // 简单的空格分割，忽略多余空格
-    const parts = rest.split(/\s+/).filter(s => s.trim())
-    if (parts.length < 3) {
-      await sendToWeixin({ userId, toUser: fromUser, text: '参数不足，请按格式输入：\n#配置API [URL] [KEY] [MODEL]', contextToken, config: account, disableSplit: true })
-      return
-    }
-    
-    let url = parts[0].trim()
-    const key = parts[1].trim()
-    const model = parts[2].trim()
-    
-    // 自动补全URL
-    if (url.startsWith('http') && !url.includes('/chat/completions')) {
-      if (url.endsWith('/v1')) {
-        url = url + '/chat/completions'
-      } else if (url.endsWith('/v1/')) {
-        url = url + 'chat/completions'
-      } else if (url.endsWith('/')) {
-        url = url + 'v1/chat/completions'
-      } else {
-        url = url + '/v1/chat/completions'
-      }
-      console.log(`[多用户微信机器人] 自动补全URL为: ${url}`)
-    }
-    
-    // 保存配置
-    let currentConfig = loadUserApiConfig(userId) || { enabled: false, apis: [] }
-    currentConfig.apis = [{ url, key, model }] // 暂时只支持单个API
-    currentConfig.enabled = true // 配置完默认启用
-    saveUserApiConfig(userId, currentConfig)
-    
-    const successText = '✅ API配置成功！\n\n已保存配置：\nURL: ' + url + '\n模型: ' + model + '\n\n当前已切换为自定义API模式'
-    await sendToWeixin({ userId, toUser: fromUser, text: successText, contextToken, config: account, disableSplit: true })
+  if (cmd.startsWith('配置api')) {
+    // 开始对话式配置
+    apiConfigStates.set(userId, { step: 'url', data: {} })
+    await sendToWeixin({ 
+      userId, 
+      toUser: fromUser, 
+      text: '好的，我们来一步步配置API！\n\n第一步，请输入你的API地址\n\n示例：\nhttps://api.example.com\nhttps://api.example.com/v1\n\n随时可以发送 #取消配置 来取消', 
+      contextToken, 
+      config: account, 
+      disableSplit: true 
+    })
     return
   }
   
   // 命令8: #我的API
-  if (cmd === '我的API') {
+  if (cmd === '我的api') {
     const currentConfig = loadUserApiConfig(userId)
     if (!currentConfig || !currentConfig.apis || currentConfig.apis.length === 0) {
       await sendToWeixin({ userId, toUser: fromUser, text: '还没有配置自定义API', contextToken, config: account, disableSplit: true })
@@ -1226,8 +1520,22 @@ async function processSystemCommand(userId, account, fromUser, contextToken, com
     return
   }
   
+  // 命令9: #开启AI主动发送消息
+  if (cmd === '开启ai主动发送消息' || cmd === '开启自动发送消息') {
+    setUserAutoMsgConfig(userId, { [AUTO_MSG_ENABLED_KEY]: true })
+    await sendToWeixin({ userId, toUser: fromUser, text: '✅ 已开启AI主动发送消息！\n\n每两小时AI会随机选择时间，主动和你聊天', contextToken, config: account, disableSplit: true })
+    return
+  }
+  
+  // 命令10: #关闭AI主动发送消息
+  if (cmd === '关闭ai主动发送消息' || cmd === '关闭自动发送消息') {
+    setUserAutoMsgConfig(userId, { [AUTO_MSG_ENABLED_KEY]: false })
+    await sendToWeixin({ userId, toUser: fromUser, text: '已关闭AI主动发送消息', contextToken, config: account, disableSplit: true })
+    return
+  }
+  
   // 未知命令
-  const helpText = '可用命令：\n\n#清除记忆\n#更改人设 [人设内容]\n#当前人设\n#我的信息\n#配置API [URL] [KEY] [MODEL]\n#我的API\n#切换官方\n#切换自定义'
+  const helpText = '可用命令：\n\n#清除记忆\n#更改人设 [人设内容]\n#当前人设\n#我的信息\n#配置API\n#我的API\n#切换官方\n#切换自定义\n#开启AI主动发送消息\n#关闭AI主动发送消息'
   await sendToWeixin({ userId, toUser: fromUser, text: helpText, contextToken, config: account, disableSplit: true })
 }
 
@@ -1296,7 +1604,7 @@ ${mergedText}
 注意：
 1. 人设优先，完全按人设说
 2. 你就是真实存在，不是AI
-3. ${allowActions ? '可以用动作描述' : '只说纯文本，不要加动作描述括号'}
+3. 不要用任何括号（包括（）、[]、<>）来写动作描述，只说纯文本
 4. 不要加人名前缀
 5. 别编其他角色的话
 6. 别重复用户的话，也别编用户没说的
@@ -1314,6 +1622,19 @@ ${mergedText}
   const aiResponse = await callAI(prompt, userId)
   console.log('[多用户微信机器人] AI回复:', aiResponse)
   
+  if (aiResponse === '__CONFLICT__') {
+    // 用户自定义API与官方冲突
+    await sendToWeixin({
+      userId,
+      toUser: fromUser,
+      text: '❌ 当前自定义API供应商与官方冲突，请使用 #切换官方 切换到官方API，或使用 #配置API 更换其他API供应商',
+      contextToken: lastMessage.contextToken,
+      config: account,
+      disableSplit: true
+    })
+    return
+  }
+  
   if (aiResponse && aiResponse.trim()) {
     // 解析AI回复，提取重要性
     let isImportant = false
@@ -1327,16 +1648,15 @@ ${mergedText}
     }
     
     // 后处理：清理违规内容
-    // 1. 只有当人设不允许动作时，才移除括号内容
-    if (!allowActions) {
-      finalResponse = finalResponse.replace(/（[^）]*）/g, '') // 中文括号
-      finalResponse = finalResponse.replace(/\([^)]*\)/g, '') // 英文括号
-    }
+    // 1. 无论人设如何，都彻底移除所有括号内容
+    finalResponse = finalResponse.replace(/（[^）]*）/g, '') // 中文括号
+    finalResponse = finalResponse.replace(/\([^)]*\)/g, '') // 英文括号
+    finalResponse = finalResponse.replace(/\[[^\]]*\]/g, '') // 方括号
+    finalResponse = finalResponse.replace(/<[^>]*>/g, '') // 尖括号
     
-    // 2. 移除人名前缀（比如 "纪文川 操" → "操"）
+    // 2. 移除人名前缀
     finalResponse = finalResponse.replace(/^[^\n：:]+[：:]\s*/gm, '')
     finalResponse = finalResponse.replace(/^[^\n]+\s+/gm, (match) => {
-      // 如果看起来像是人名（不长，没有标点），就移除
       if (match.trim().length < 10 && !/[，。！？,.!?]/.test(match)) {
         return ''
       }
@@ -1349,20 +1669,9 @@ ${mergedText}
     console.log('[多用户微信机器人] 清理后回复:', finalResponse)
     console.log('[多用户微信机器人] 是否保存记忆:', isImportant)
     
-    // 如果清理后回复是空的，就不发送
+    // 如果清理后回复是空的，直接使用原AI回复
     if (!finalResponse || !finalResponse.trim()) {
-      console.log('[多用户微信机器人] 清理后回复为空，不发送')
-      // 发个可爱的失败消息
-      const cuteFailureMsg = '嗷呜~对话被风云吃掉啦🥺'
-      await sendToWeixin({
-        userId,
-        toUser: fromUser,
-        text: cuteFailureMsg,
-        contextToken: lastMessage.contextToken,
-        config: account,
-        disableSplit: true
-      })
-      return
+      finalResponse = aiResponse.trim()
     }
     
     addChatLog(userId, 'assistant', finalResponse)
@@ -1413,21 +1722,23 @@ export class AI_MultiUser_Bot extends plugin {
       dsc: '多用户独立登录微信，独立人设配置和聊天记忆',
       event: 'message', priority: 4000,
       rule: [
-        { reg: '^[#＃]登[陆录]微信[Aa][Ii]$', fnc: 'loginWeixin' },
-        { reg: '^[#＃]微信登[陆录][Aa][Ii]$', fnc: 'loginWeixin' },
-        { reg: '^[#＃]更改人设', fnc: 'changePersona' },
-        { reg: '^[#＃]当前人设$', fnc: 'showCurrentPersona' },
-        { reg: '^[#＃]清除记忆$', fnc: 'clearMemoryCmd' },
-        { reg: '^[#＃]我的信息$', fnc: 'showMyInfo' },
-        { reg: '^[#＃]站点状态$', fnc: 'showApiStatus' },
-        { reg: '^[#＃]微信机器人在线列表$', fnc: 'listOnlineBots' },
-        { reg: '^[#＃]在线用户$', fnc: 'showOnlineUsers' },
-        { reg: '^[#＃]停止机器人(.*)$', fnc: 'stopBot' },
-        { reg: '^[#＃]启动机器人(.*)$', fnc: 'startBot' },
-        { reg: '^[#＃]删除机器人(.*)$', fnc: 'deleteBot' },
-        { reg: '^[#＃]关于$', fnc: 'showAbout' },
-        { reg: '^[#＃]推广$', fnc: 'showPromotion' },
-        { reg: '^[#＃]帮助多用户$', fnc: 'showHelp' }
+        { reg: '^[#＃]\\s*登[陆录]\\s*微信\\s*[Aa][Ii]$', fnc: 'loginWeixin' },
+        { reg: '^[#＃]\\s*微信\\s*登[陆录]\\s*[Aa][Ii]$', fnc: 'loginWeixin' },
+        { reg: '^[#＃]\\s*更改\\s*人设', fnc: 'changePersona' },
+        { reg: '^[#＃]\\s*当前\\s*人设$', fnc: 'showCurrentPersona' },
+        { reg: '^[#＃]\\s*清除\\s*记忆$', fnc: 'clearMemoryCmd' },
+        { reg: '^[#＃]\\s*我的\\s*信息$', fnc: 'showMyInfo' },
+        { reg: '^[#＃]\\s*站点\\s*状态$', fnc: 'showApiStatus' },
+        { reg: '^[#＃]\\s*微信\\s*机器人\\s*在线\\s*列表$', fnc: 'listOnlineBots' },
+        { reg: '^[#＃]\\s*在线\\s*用户$', fnc: 'showOnlineUsers' },
+        { reg: '^[#＃]\\s*停止\\s*机器人', fnc: 'stopBot' },
+        { reg: '^[#＃]\\s*启动\\s*机器人', fnc: 'startBot' },
+        { reg: '^[#＃]\\s*删除\\s*机器人', fnc: 'deleteBot' },
+        { reg: '^[#＃]\\s*关于$', fnc: 'showAbout' },
+        { reg: '^[#＃]\\s*推广$', fnc: 'showPromotion' },
+        { reg: '^[#＃]\\s*帮助\\s*多用户$', fnc: 'showHelp' },
+        { reg: '^[#＃]\\s*微信\\s*机器人\\s*登录', fnc: 'adminLoginWeixin' },
+        { reg: '^[#＃]\\s*查询\\s*用户', fnc: 'queryUser' }
       ]
     })
     
@@ -1446,31 +1757,58 @@ export class AI_MultiUser_Bot extends plugin {
         startAccountMonitor(account.userId, account)
       }
     }
+    
+    // 启动自动发消息定时器
+    startAutoMsgTimer()
   }
   
   async loginWeixin() {
     const userId = this.e.user_id
-    const result = await startWeixinLogin(userId, this)
+    const messageId = this.e.message_id
+    const result = await startWeixinLogin(userId, this, messageId)
     
     if (result.status === 'success' || result.status === 'exists') {
-      await this.reply(result.message)
+      // 先发送带艾特和引用的文本
+      await this.reply([
+        segment.reply(messageId),
+        segment.at(userId),
+        ' ',
+        result.message
+      ])
       
       try {
         const filename = `qrcode_${userId}_${Date.now()}.png`
         const filepath = path.join(TEMP_DIR, filename)
         
         await screenshotUrl(result.qrcodeUrl, filepath)
-        await this.reply(segment.image(filepath))
+        
+        // 发送带艾特和引用的图片
+        await this.reply([
+          segment.reply(messageId),
+          segment.at(userId),
+          ' ',
+          segment.image(filepath)
+        ])
         
         setTimeout(() => {
           try { fs.unlinkSync(filepath) } catch (e) { }
         }, 120000)
       } catch (e) {
         console.error('[多用户微信机器人] 发送失败', e)
-        await this.reply(result.qrcodeUrl)
+        await this.reply([
+          segment.reply(messageId),
+          segment.at(userId),
+          ' ',
+          result.qrcodeUrl
+        ])
       }
     } else {
-      await this.reply(result.message)
+      await this.reply([
+        segment.reply(messageId),
+        segment.at(userId),
+        ' ',
+        result.message
+      ])
     }
     
     return true
@@ -1841,8 +2179,139 @@ export class AI_MultiUser_Bot extends plugin {
   
   async showHelp() {
     await this.reply(
-      `多用户微信机器人帮助:\n\n📱 登录与人设\n#登录微信AI - 获取二维码登录微信\n#更改人设 人设内容 - 修改自己的人设（需已登录并运行）\n  （支持多行、任意长度的人设内容）\n\n📝 人设与记忆\n#当前人设 - 查看当前人设（需已登录）\n#清除记忆 - 清除自己的聊天记忆（需已登录）\n#我的信息 - 查看个人信息和统计数据（需已登录）\n\n🤖 机器人管理\n#微信机器人在线列表 - 查看所有账号状态\n#停止机器人 [用户ID] - 停止指定账号\n#启动机器人 [用户ID] - 启动指定账号\n#删除机器人 [用户ID] - 删除账号\n\n📖 其他\n#关于 - 查看项目信息和开源说明\n#推广 - 查看推广计划，帮我们宣传\n#帮助多用户 - 查看此帮助\n\n普通用户: #登录微信AI 登录自己的微信\n主人: 可以管理所有账号`
+      `多用户微信机器人帮助:\n\n📱 登录与人设\n#登录微信AI - 获取二维码登录微信\n#微信机器人登录 <名称> - 管理员通过名称登录（绑定到当前QQ）\n#更改人设 人设内容 - 修改自己的人设（需已登录并运行）\n  （支持多行、任意长度的人设内容）\n\n📝 人设与记忆\n#当前人设 - 查看当前人设（需已登录）\n#清除记忆 - 清除自己的聊天记忆（需已登录）\n#我的信息 - 查看个人信息和统计数据（需已登录）\n#查询用户 <名称/QQ号> - 查询用户绑定关系\n\n🤖 机器人管理\n#微信机器人在线列表 - 查看所有账号状态\n#停止机器人 [用户ID] - 停止指定账号\n#启动机器人 [用户ID] - 启动指定账号\n#删除机器人 [用户ID] - 删除账号\n\n📖 其他\n#关于 - 查看项目信息和开源说明\n#推广 - 查看推广计划，帮我们宣传\n#帮助多用户 - 查看此帮助\n\n普通用户: #登录微信AI 登录自己的微信\n主人: 可以管理所有账号`
     )
+    return true
+  }
+  
+  async adminLoginWeixin() {
+    const cmd = this.e.msg.replace('#微信机器人登录', '').replace('＃微信机器人登录', '').trim()
+    
+    if (!cmd) {
+      await this.reply('请输入要绑定的名称，格式：\n#微信机器人登录 <名称>')
+      return true
+    }
+    
+    const name = cmd
+    const userId = this.e.user_id.toString()
+    
+    // 检查名称是否已被绑定
+    const bindings = loadNameBindings()
+    
+    if (bindings[name] && bindings[name] !== userId) {
+      await this.reply('该名称已被其他用户绑定')
+      return true
+    }
+    
+    // 保存绑定
+    bindings[name] = userId
+    saveNameBindings(bindings)
+    
+    // 开始登录
+    const messageId = this.e.message_id
+    const result = await startWeixinLogin(userId, this, messageId)
+    
+    if (result.status === 'success' || result.status === 'exists') {
+      // 先发送带艾特和引用的文本
+      await this.reply([
+        segment.reply(messageId),
+        segment.at(userId),
+        ' ',
+        result.message
+      ])
+      
+      try {
+        const filename = `qrcode_${userId}_${Date.now()}.png`
+        const filepath = path.join(TEMP_DIR, filename)
+        
+        await screenshotUrl(result.qrcodeUrl, filepath)
+        
+        // 发送带艾特和引用的图片
+        await this.reply([
+          segment.reply(messageId),
+          segment.at(userId),
+          ' ',
+          segment.image(filepath)
+        ])
+        
+        setTimeout(() => {
+          try { fs.unlinkSync(filepath) } catch (e) {}
+        }, 120000)
+      } catch (e) {
+        console.error('[多用户微信机器人] 发送失败', e)
+        await this.reply([
+          segment.reply(messageId),
+          segment.at(userId),
+          ' ',
+          result.qrcodeUrl
+        ])
+      }
+    } else {
+      await this.reply([
+        segment.reply(messageId),
+        segment.at(userId),
+        ' ',
+        result.message
+      ])
+    }
+    
+    return true
+  }
+  
+  async queryUser() {
+    const cmd = this.e.msg.replace('#查询用户', '').replace('＃查询用户', '').trim()
+    
+    if (!cmd) {
+      await this.reply('请输入要查询的名称或QQ号，格式：\n#查询用户 <名称/QQ号>')
+      return true
+    }
+    
+    const bindings = loadNameBindings()
+    const query = cmd.trim()
+    
+    let result = ''
+    
+    // 检查是否是数字（QQ号）
+    if (/^\d+$/.test(query)) {
+      // 查询QQ号对应的名称
+      const qq = query
+      const foundNames = []
+      for (const [name, id] of Object.entries(bindings)) {
+        if (id === qq) {
+          foundNames.push(name)
+        }
+      }
+      
+      if (foundNames.length > 0) {
+        result = '🔍 查询结果\n────────────────\n'
+        result += `QQ号：${qq}\n`
+        result += `绑定名称：${foundNames.join('、')}\n`
+      } else {
+        result = '未找到该QQ号的绑定记录'
+      }
+    } else {
+      // 查询名称对应的QQ号
+      const name = query
+      if (bindings[name]) {
+        const account = loadAccount(bindings[name])
+        const isOnline = accountMonitors.has(bindings[name])
+        
+        result = '🔍 查询结果\n────────────────\n'
+        result += `名称：${name}\n`
+        result += `QQ号：${bindings[name]}\n`
+        
+        if (account) {
+          result += `机器人ID：${account.accountId || '未知'}\n`
+          result += `在线状态：${isOnline ? '🟢 在线' : '🔴 离线'}\n`
+        } else {
+          result += `状态：未登录\n`
+        }
+      } else {
+        result = '未找到该名称的绑定记录'
+      }
+    }
+    
+    await this.reply(result)
     return true
   }
 }
