@@ -1,51 +1,179 @@
 import fs from 'node:fs'
 import path from 'node:path'
-import { randomUUID } from 'node:crypto'
+import { randomUUID, createCipheriv, createDecipheriv, scryptSync } from 'node:crypto'
 import puppeteer from 'puppeteer'
 import common from '#utils/common.js'
 
+// 加密密钥（从环境变量获取或使用默认值）
+const ENCRYPTION_KEY = process.env.MULTIUSER_ENCRYPTION_KEY || 'xrk-agt-wechat-bot-key-2025'
+const ENCRYPTION_ALGORITHM = 'aes-256-cbc'
+const KEY_LENGTH = 32 // AES-256
+
+// 生成密钥（处理成正确长度）
+function getEncryptionKey() {
+  return scryptSync(ENCRYPTION_KEY, 'salt', KEY_LENGTH)
+}
+
+// 加密函数
+function encryptData(text) {
+  const key = getEncryptionKey()
+  const iv = Buffer.alloc(16, 0)
+  const cipher = createCipheriv(ENCRYPTION_ALGORITHM, key, iv)
+  let encrypted = cipher.update(String(text || ''), 'utf8', 'hex')
+  encrypted += cipher.final('hex')
+  return 'enc:' + encrypted
+}
+
+// 解密函数
+function decryptData(encryptedHex) {
+  if (!encryptedHex) return ''
+  
+  let data = encryptedHex
+  if (data.startsWith('enc:')) {
+    data = data.substring(4)
+  }
+  
+  const key = getEncryptionKey()
+  const iv = Buffer.alloc(16, 0)
+  const decipher = createDecipheriv(ENCRYPTION_ALGORITHM, key, iv)
+  let decrypted = decipher.update(data, 'hex', 'utf8')
+  decrypted += decipher.final('utf8')
+  return decrypted
+}
+
+// 安全文件写入（带备份和回滚）
+function safeWriteFileSync(filePath, content) {
+  const tempPath = filePath + '.tmp'
+  const backupPath = filePath + '.backup'
+  try {
+    // 写入临时文件
+    fs.writeFileSync(tempPath, content, 'utf8')
+    // 如果原文件存在，做备份
+    if (fs.existsSync(filePath)) {
+      fs.copyFileSync(filePath, backupPath)
+    }
+    // 原子替换
+    fs.renameSync(tempPath, filePath)
+    // 删除备份
+    if (fs.existsSync(backupPath)) {
+      fs.unlinkSync(backupPath)
+    }
+    return true
+  } catch (e) {
+    console.error(`[多用户微信机器人] 写入文件失败: ${filePath}`, e)
+    // 回滚
+    if (fs.existsSync(backupPath)) {
+      fs.renameSync(backupPath, filePath)
+    }
+    return false
+  }
+}
+
 const TEMP_DIR = path.join(process.cwd(), 'data', 'temp', 'multiuser-wechat')
-
-if (!fs.existsSync(TEMP_DIR)) {
-  fs.mkdirSync(TEMP_DIR, { recursive: true })
-}
-
-let browser = null
-
-async function getBrowser() {
-  if (browser && (await browser.pages()).length > 0) return browser
-  browser = await puppeteer.launch({
-    headless: 'new',
-    args: ['--disable-gpu', '--no-sandbox', '--disable-dev-shm-usage']
-  })
-  console.log('[多用户微信机器人] Puppeteer 浏览器已启动')
-  return browser
-}
-
-async function screenshotUrl(url, filepath) {
-  const br = await getBrowser()
-  const page = await br.newPage()
-  await page.setViewport({ width: 400, height: 600 })
-  await page.goto(url, { waitUntil: 'networkidle2', timeout: 15000 })
-  await page.evaluate(() => new Promise(r => setTimeout(r, 1000)))
-  await page.screenshot({ path: filepath, type: 'png' })
-  await page.close()
-  return filepath
-}
-
 const DATA_DIR = path.join(process.cwd(), 'core', 'AI-MultiUser-Core', 'accounts')
 const MASTER_FILE = path.join(process.cwd(), 'core', 'AI-MultiUser-Core', 'masters.json')
 const DEFAULT_PERSONA_FILE = path.join(process.cwd(), 'core', 'AI-MultiUser-Core', 'default-persona.md')
 const AI_MULTIUSER_DIR = path.join(process.cwd(), 'core', 'AI-MultiUser-Core')
-const FIXED_BASE_URL = 'https://ilinkai.weixin.qq.com'
-const DEFAULT_ILINK_BOT_TYPE = '3'
+const NAME_BINDING_FILE = path.join(AI_MULTIUSER_DIR, 'name-bindings.json')
+
+// API配置
+const API_RETRY_TIMES = 2 // API重试次数
+const API_CALL_TIMEOUT_MS = 30000 // API调用超时
+const API_HEALTH_CHECK_INTERVAL_MS = 2 * 60 * 1000 // 健康检查间隔：2分钟
+
+// 消息合并配置
+const MESSAGE_MERGE_WAIT_MS = 3000
+
+// 二维码配置
 const QR_LONG_POLL_TIMEOUT_MS = 35000
 const ACTIVE_LOGIN_TTL_MS = 5 * 60000
+
+// 微信API配置
+const FIXED_BASE_URL = 'https://ilinkai.weixin.qq.com'
+const DEFAULT_ILINK_BOT_TYPE = '3'
 const CHANNEL_VERSION = '2.1.10'
 const ILINK_APP_ID = ''
 
 if (!fs.existsSync(DATA_DIR)) {
   fs.mkdirSync(DATA_DIR, { recursive: true })
+}
+
+if (!fs.existsSync(TEMP_DIR)) {
+  fs.mkdirSync(TEMP_DIR, { recursive: true })
+}
+
+// Puppeteer管理
+let browser = null
+let browserRefCount = 0
+
+async function getBrowser() {
+  if (browser) {
+    try {
+      // 检查浏览器是否还活着
+      await browser.pages()
+      browserRefCount++
+      return browser
+    } catch (e) {
+      console.warn('[多用户微信机器人] 浏览器已关闭，重新启动')
+      browser = null
+    }
+  }
+  browser = await puppeteer.launch({
+    headless: 'new',
+    args: ['--disable-gpu', '--no-sandbox', '--disable-dev-shm-usage']
+  })
+  browserRefCount = 1
+  console.log('[多用户微信机器人] Puppeteer 浏览器已启动')
+  
+  // 注册进程退出时关闭浏览器
+  process.on('SIGINT', closeBrowser)
+  process.on('SIGTERM', closeBrowser)
+  
+  return browser
+}
+
+async function closeBrowser() {
+  if (browser) {
+    try {
+      console.log('[多用户微信机器人] 关闭 Puppeteer 浏览器')
+      await browser.close()
+    } catch (e) {
+      console.error('[多用户微信机器人] 关闭浏览器失败', e)
+    }
+    browser = null
+    browserRefCount = 0
+  }
+}
+
+async function releaseBrowser() {
+  browserRefCount--
+  // 如果没有引用了，不立即关闭，后续还会用到
+  // 保持浏览器常驻
+}
+
+async function screenshotUrl(url, filepath) {
+  let page = null
+  try {
+    const br = await getBrowser()
+    page = await br.newPage()
+    await page.setViewport({ width: 400, height: 600 })
+    await page.goto(url, { waitUntil: 'networkidle2', timeout: 15000 })
+    await page.evaluate(() => new Promise(r => setTimeout(r, 1000)))
+    await page.screenshot({ path: filepath, type: 'png' })
+    return filepath
+  } catch (e) {
+    console.error('[多用户微信机器人] 截图失败', e)
+    throw e
+  } finally {
+    if (page) {
+      try {
+        await page.close()
+      } catch (e) {
+        console.warn('[多用户微信机器人] 关闭页面失败', e)
+      }
+    }
+    await releaseBrowser()
+  }
 }
 
 const activeLogins = new Map()
@@ -55,27 +183,67 @@ const accountMonitors = new Map()
 const userMessageQueues = new Map()
 // 防抖计时器
 const userDebounceTimers = new Map()
-// 消息合并等待时间（毫秒）
-const MESSAGE_MERGE_WAIT_MS = 3000
 
 // API配置状态管理：{ [userId]: { step: 'url'|'key'|'model', data: { url?: string, key?: string } } }
 const apiConfigStates = new Map()
+
+// 全局变量：API轮询索引、用户下次主动发消息时间、自动发消息定时器
+let currentApiIndex = 0
+const userNextAutoMsgTime = new Map()
+let autoMsgInterval = null
 
 // 自动发消息配置
 const AUTO_MSG_ENABLED_KEY = 'autoMsgEnabled'
 const AUTO_MSG_LAST_ACTIVE_KEY = 'autoMsgLastActive'
 const AUTO_MSG_LAST_SENT_KEY = 'autoMsgLastSent'
 
-// 名称与QQ绑定配置
-const NAME_BINDING_FILE = path.join(AI_MULTIUSER_DIR, 'name-bindings.json')
+// 监控和告警数据
+const monitorData = {
+  apiCalls: 0,
+  apiFailures: 0,
+  messagesProcessed: 0,
+  errors: [],
+  lastErrorTime: null,
+}
 
-// API轮询索引
-let currentApiIndex = 0
+// 添加错误监控
+function logError(error, context = '') {
+  monitorData.errors.push({
+    time: new Date().toISOString(),
+    message: error.message || String(error),
+    stack: error.stack,
+    context
+  })
+  monitorData.apiFailures++
+  monitorData.lastErrorTime = Date.now()
+  console.error(`[多用户微信机器人] [ERROR] ${context}`, error)
+}
 
-// 自动发消息的定时器
-let autoMsgInterval = null
-// 每个用户的下次主动发消息时间 { [userId]: timestamp }
-const userNextAutoMsgTime = new Map()
+// 获取监控状态
+function getMonitorStatus() {
+  return { ...monitorData, totalApiCalls: monitorData.apiCalls, totalFailures: monitorData.apiFailures }
+}
+
+// 加载管理员列表
+function loadMasters() {
+  if (!fs.existsSync(MASTER_FILE)) {
+    return []
+  }
+  try {
+    const content = fs.readFileSync(MASTER_FILE, 'utf8')
+    const data = JSON.parse(content)
+    return Array.isArray(data.qqList) ? data.qqList : []
+  } catch (e) {
+    console.warn('[多用户微信机器人] 加载管理员列表失败', e)
+    return []
+  }
+}
+
+// 验证是否为管理员
+function isAdmin(userId) {
+  const masters = loadMasters()
+  return masters.includes(String(userId))
+}
 
 // 加载名称绑定
 function loadNameBindings() {
@@ -92,8 +260,10 @@ function loadNameBindings() {
 
 // 保存名称绑定
 function saveNameBindings(bindings) {
-  fs.writeFileSync(NAME_BINDING_FILE, JSON.stringify(bindings, null, 2))
+  const success = safeWriteFileSync(NAME_BINDING_FILE, JSON.stringify(bindings, null, 2))
+  return success
 }
+
 
 function randomWechatUin() {
   const uint32 = new Uint32Array(1)
@@ -185,7 +355,17 @@ function loadAccount(userId) {
   const configPath = path.join(getAccountDir(userId), 'config.json')
   try {
     if (fs.existsSync(configPath)) {
-      return JSON.parse(fs.readFileSync(configPath, 'utf8'))
+      const data = JSON.parse(fs.readFileSync(configPath, 'utf8'))
+      
+      if (data.token && data.token.startsWith('enc:')) {
+        try {
+          data.token = decryptData(data.token.substring(4))
+        } catch (e) {
+          console.warn(`[多用户微信机器人] 解密 ${userId} 的 token 失败，使用原始值`)
+        }
+      }
+      
+      return data
     }
   } catch (err) {
     console.error('[多用户微信机器人] 加载账号配置失败', err)
@@ -199,12 +379,24 @@ function saveAccount(userId, config) {
     fs.mkdirSync(dir, { recursive: true })
   }
   const configPath = path.join(dir, 'config.json')
-  fs.writeFileSync(configPath, JSON.stringify(config, null, 2))
+  
+  const configToSave = { ...config }
+  
+  if (configToSave.token) {
+    configToSave.token = encryptData(configToSave.token)
+  }
+  
+  const success = safeWriteFileSync(configPath, JSON.stringify(configToSave, null, 2))
+  if (!success) {
+    console.error(`[多用户微信机器人] 保存账号配置失败: ${userId}`)
+    return false
+  }
   
   const personaPath = path.join(dir, 'persona.md')
   if (!fs.existsSync(personaPath) && fs.existsSync(DEFAULT_PERSONA_FILE)) {
     fs.copyFileSync(DEFAULT_PERSONA_FILE, personaPath)
   }
+  return true
 }
 
 function deleteAccountDir(userId) {
@@ -746,6 +938,15 @@ function updateUserLastActive(userId) {
   setUserAutoMsgConfig(userId, { [AUTO_MSG_LAST_ACTIVE_KEY]: Date.now() })
 }
 
+// 重置用户的下次主动发消息时间（随机30-120分钟）
+function resetUserNextAutoMsgTime(userId) {
+  const minutes = 30 + Math.floor(Math.random() * 91)
+  const nextAutoMsgTimestamp = Date.now() + minutes * 60 * 1000
+  setUserAutoMsgConfig(userId, { nextAutoMsgTime: nextAutoMsgTimestamp })
+  userNextAutoMsgTime.set(userId, nextAutoMsgTimestamp)
+  console.log(`[多用户微信机器人] 用户${userId}下次主动发消息时间已重置: ${new Date(nextAutoMsgTimestamp).toLocaleString()}`)
+}
+
 // 格式化时间差（比如：30分钟、1小时、2小时30分）
 function formatTimeDiff(ms) {
   const minutes = Math.floor(ms / 60000)
@@ -957,29 +1158,27 @@ async function checkApiHealth(api) {
   }
   
   // 快速检查：发送一个简单请求（max_tokens=1）
-    try {
-      const response = await fetch(api.url, {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          'Authorization': `Bearer ${api.key}`
-        },
-        body: JSON.stringify({
-          model: api.model,
-          messages: [{ role: 'user', content: 'hi' }],
-          max_tokens: 1,
-          temperature: 0
-        }),
-        signal: AbortSignal.timeout(10000) // 10秒超时
-      })
-    
+  try {
+    const response = await fetch(api.url, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'Authorization': `Bearer ${api.key}`
+      },
+      body: JSON.stringify({
+        model: api.model,
+        messages: [{ role: 'user', content: 'hi' }],
+        max_tokens: 1,
+        temperature: 0
+      }),
+      signal: AbortSignal.timeout(10000) // 10秒超时
+    })
+  
     const ok = response.ok
     apiHealth.set(api.url, { ok, lastCheck: now })
-    console.log(`[多用户微信机器人] API ${api.url} 健康检查: ${ok ? '✅' : '❌'}`)
     return ok
   } catch (e) {
     apiHealth.set(api.url, { ok: false, lastCheck: now })
-    console.log(`[多用户微信机器人] API ${api.url} 健康检查: ❌ (${e.message})`)
     return false
   }
 }
@@ -1007,6 +1206,82 @@ function loadPluginConfig() {
     console.error('[多用户微信机器人] 加载插件配置失败', e)
   }
   return cachedConfig
+}
+
+// 单个 API 调用函数，带重试逻辑（最多重试 API_RETRY_TIMES 次）
+async function callSingleApi(api, prompt, isUserApi = false) {
+  monitorData.apiCalls++
+  const startTime = Date.now()
+  
+  for (let retryCount = 0; retryCount <= API_RETRY_TIMES; retryCount++) {
+    try {
+      const response = await fetch(api.url, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'Authorization': `Bearer ${api.key}`
+        },
+        body: JSON.stringify({
+          model: api.model,
+          messages: [
+            {
+              role: 'user',
+              content: prompt
+            }
+          ],
+          temperature: 0.7,
+          max_tokens: 1000
+        }),
+        signal: AbortSignal.timeout(API_CALL_TIMEOUT_MS)
+      })
+
+      if (response.ok) {
+        const data = await response.json()
+        const duration = Date.now() - startTime
+        console.log(`[多用户微信机器人] API ${api.url} 调用成功 (${duration}ms)`)
+        
+        let result = null
+        
+        // 尝试多种返回格式
+        if (data.choices?.[0]?.message?.content) {
+          result = data.choices[0].message.content
+        } else if (data.message?.content) {
+          result = data.message.content
+        } else if (data.content) {
+          result = data.content
+        } else if (data.text) {
+          result = data.text
+        } else if (data.response) {
+          result = data.response
+        }
+        
+        // 用户自定义 API 放宽检查
+        if (!result && isUserApi) {
+          result = JSON.stringify(data)
+        }
+        
+        if (result) {
+          return result
+        }
+      } else {
+        const duration = Date.now() - startTime
+        console.warn(`[多用户微信机器人] API ${api.url} 失败 (${duration}ms): ${response.status}`)
+      }
+    } catch (e) {
+      const duration = Date.now() - startTime
+      console.warn(`[多用户微信机器人] API ${api.url} 异常 (${duration}ms):`, e.message)
+    }
+    
+    // 如果还需要重试，等待一段时间
+    if (retryCount < API_RETRY_TIMES) {
+      console.warn(`[多用户微信机器人] API ${api.url} 失败，第 ${retryCount + 1} 次重试...`)
+      await new Promise(resolve => setTimeout(resolve, 500 * (retryCount + 1)))
+    }
+  }
+  
+  // 所有重试都失败了
+  monitorData.apiFailures++
+  return null
 }
 
 async function callAI(prompt, userId) {
@@ -1070,89 +1345,35 @@ async function callAI(prompt, userId) {
   
   console.log(`[多用户微信机器人] 可用API数量: ${availableApis.length}/${apisToUse.length}`)
 
-  // 只在可用的API中轮询
-  const originalIndex = currentApiIndex % availableApis.length
+  // 只在可用的 API 中轮询，每个 API 都会通过 callSingleApi 重试最多 API_RETRY_TIMES 次
+  let lastApiIndex = currentApiIndex % availableApis.length
   for (let i = 0; i < availableApis.length; i++) {
-    const apiIndex = (originalIndex + i) % availableApis.length
+    const apiIndex = (lastApiIndex + i) % availableApis.length
     const api = availableApis[apiIndex]
     
     console.log(`[多用户微信机器人] 尝试API: ${api.url}`)
     
-    try {
-      const response = await fetch(api.url, {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          'Authorization': `Bearer ${api.key}`
-        },
-        body: JSON.stringify({
-          model: api.model,
-          messages: [
-            {
-              role: 'user',
-              content: prompt
-            }
-          ],
-          temperature: 0.7,
-          max_tokens: 1000
-        }),
-        signal: AbortSignal.timeout(30000) // 30秒超时
-      })
-
-      if (response.ok) {
-        const data = await response.json()
-        console.log(`[多用户微信机器人] API ${api.url} 完整返回:`, JSON.stringify(data, null, 2))
-        
-        let result = null
-        
-        // 尝试多种返回格式
-        if (data.choices?.[0]?.message?.content) {
-          result = data.choices[0].message.content
-        } else if (data.message?.content) {
-          result = data.message.content
-        } else if (data.content) {
-          result = data.content
-        } else if (data.text) {
-          result = data.text
-        } else if (data.response) {
-          result = data.response
-        }
-        
-        // 用户自定义 API 放宽检查！
-        if (!result && useUserApi) {
-          console.warn(`[多用户微信机器人] 用户自定义 API 返回非常规格式，尝试直接转字符串`)
-          result = JSON.stringify(data)
-        }
-        
-        if (!result) {
-          console.warn(`[多用户微信机器人] API ${api.url} 返回空内容:`, data)
-          // 用户自定义 API 即使返回空也继续尝试下一个，不要标记！
-          if (!useUserApi) {
-            apiHealth.set(api.url, { ok: false, lastCheck: Date.now() })
-          }
-          continue
-        }
-        
-        // 成功了，更新索引
-        const originalApiIndex = apisToUse.findIndex(a => a.url === api.url)
-        currentApiIndex = originalApiIndex + 1
-        console.log(`[多用户微信机器人] API ${api.url} 调用成功`)
-        return result
-      } else {
-        const errorText = await response.text()
-        console.warn(`[多用户微信机器人] API ${api.url} 失败: ${response.status}`, errorText)
-        // 标记这个API失败
-        apiHealth.set(api.url, { ok: false, lastCheck: Date.now() })
+    const result = await callSingleApi(api, prompt, useUserApi)
+    
+    if (result) {
+      // 成功了，更新索引和健康状态
+      const originalApiIndex = apisToUse.findIndex(a => a.url === api.url)
+      currentApiIndex = originalApiIndex + 1
+      if (!useUserApi) {
+        apiHealth.set(api.url, { ok: true, lastCheck: Date.now() })
       }
-    } catch (e) {
-      console.warn(`[多用户微信机器人] API ${api.url} 异常:`, e.message)
-      // 标记这个API失败
+      return result
+    }
+    
+    // 标记这个 API 失败（仅官方 API）
+    if (!useUserApi) {
       apiHealth.set(api.url, { ok: false, lastCheck: Date.now() })
     }
   }
   
-  // 所有可用API都失败了
-  console.error('[多用户微信机器人] 所有API调用失败')
+  // 所有可用 API 都失败了（2 次重试后仍失败）
+  console.error('[多用户微信机器人] 所有 API 调用失败（已重试 2 次）')
+  logError(new Error('所有 API 调用均失败'), 'callAI')
   
   return null
 }
@@ -1920,6 +2141,12 @@ export class AI_MultiUser_Bot extends plugin {
   }
   
   async listOnlineBots() {
+    const userId = this.e.user_id
+    if (!isAdmin(userId)) {
+      await this.reply('❌ 你没有管理员权限，无法使用此命令')
+      return true
+    }
+    
     const accounts = getAllAccounts()
     
     if (accounts.length === 0) {
@@ -2048,6 +2275,12 @@ export class AI_MultiUser_Bot extends plugin {
   }
   
   async stopBot() {
+    const userId = this.e.user_id
+    if (!isAdmin(userId)) {
+      await this.reply('❌ 你没有管理员权限，无法使用此命令')
+      return true
+    }
+    
     const args = this.e.msg.replace('#停止机器人', '').trim()
     const targetUserId = args || this.e.user_id
     
@@ -2067,6 +2300,12 @@ export class AI_MultiUser_Bot extends plugin {
   }
   
   async startBot() {
+    const userId = this.e.user_id
+    if (!isAdmin(userId)) {
+      await this.reply('❌ 你没有管理员权限，无法使用此命令')
+      return true
+    }
+    
     const args = this.e.msg.replace('#启动机器人', '').trim()
     const targetUserId = args || this.e.user_id
     
@@ -2086,6 +2325,12 @@ export class AI_MultiUser_Bot extends plugin {
   }
   
   async deleteBot() {
+    const userId = this.e.user_id
+    if (!isAdmin(userId)) {
+      await this.reply('❌ 你没有管理员权限，无法使用此命令')
+      return true
+    }
+    
     const args = this.e.msg.replace('#删除机器人', '').trim()
     const targetUserId = args || this.e.user_id
     
@@ -2334,6 +2579,12 @@ export class AI_MultiUser_Bot extends plugin {
   }
   
   async adminLoginWeixin() {
+    const userId = this.e.user_id
+    if (!isAdmin(userId)) {
+      await this.reply('❌ 你没有管理员权限，无法使用此命令')
+      return true
+    }
+    
     const cmd = this.e.msg.replace('#微信机器人登录', '').replace('＃微信机器人登录', '').trim()
     
     if (!cmd) {
@@ -2342,18 +2593,18 @@ export class AI_MultiUser_Bot extends plugin {
     }
     
     const name = cmd
-    const userId = this.e.user_id.toString()
+    const userIdStr = userId.toString()
     
     // 检查名称是否已被绑定
     const bindings = loadNameBindings()
     
-    if (bindings[name] && bindings[name] !== userId) {
+    if (bindings[name] && bindings[name] !== userIdStr) {
       await this.reply('该名称已被其他用户绑定')
       return true
     }
     
     // 保存绑定
-    bindings[name] = userId
+    bindings[name] = userIdStr
     saveNameBindings(bindings)
     
     // 开始登录
