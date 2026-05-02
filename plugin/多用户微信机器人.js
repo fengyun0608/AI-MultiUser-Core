@@ -73,9 +73,9 @@ const NAME_BINDING_FILE = path.join(AI_MULTIUSER_DIR, 'name-bindings.json')
 let currentApiIndex = 0
 
 // 自动发消息的定时器
-let autoMsgTimeout = null
-// 下次自动发消息的时间
-let nextAutoMsgTime = null
+let autoMsgInterval = null
+// 每个用户的下次主动发消息时间 { [userId]: timestamp }
+const userNextAutoMsgTime = new Map()
 
 // 加载名称绑定
 function loadNameBindings() {
@@ -728,6 +728,7 @@ function getUserAutoMsgConfig(userId) {
     lastActive: account?.[AUTO_MSG_LAST_ACTIVE_KEY] || 0,
     lastSent: account?.[AUTO_MSG_LAST_SENT_KEY] || 0,
     lastChatFromUser: account?.lastChatFromUser,
+    nextAutoMsgTime: account?.nextAutoMsgTime || 0,
   }
 }
 
@@ -740,6 +741,7 @@ function setUserAutoMsgConfig(userId, updates) {
   saveAccount(userId, newAccount)
 }
 
+// 重置/设置用户的下次主动发消息时间（延长2小时，随机15-45分钟）
 function updateUserLastActive(userId) {
   setUserAutoMsgConfig(userId, { [AUTO_MSG_LAST_ACTIVE_KEY]: Date.now() })
 }
@@ -777,7 +779,7 @@ async function generateAutoMessage(userId, account) {
     const recentMemories = getRecentMemoriesString(userId, 2)
     const beijingTime = getBeijingTime()
     
-    const prompt = `现在请主动和用户说话！
+    const prompt = `现在是你主动给用户发消息的时间！
 
 【你的人设】
 ${personaText}
@@ -815,111 +817,102 @@ ${history || ''}
 }
 
 // 给用户发送主动消息
-async function sendAutoMessages() {
-  console.log('[多用户微信机器人] 开始给用户发送主动消息')
-  
-  // 获取所有开启的用户
-  const accounts = getAllAccounts()
-  const enabledAccounts = accounts.filter(a => a.enabled && a[AUTO_MSG_ENABLED_KEY] && a.lastChatFromUser)
-  
-  if (enabledAccounts.length === 0) {
-    console.log('[多用户微信机器人] 没有开启自动发消息的用户')
-    scheduleNextAutoMessage()
-    return
-  }
-  
-  // 随机选1-2个用户
-  const numToSelect = Math.min(enabledAccounts.length, 1 + Math.floor(Math.random() * 2))
-  const selected = []
-  const used = new Set()
-  
-  while (selected.length < numToSelect) {
-    const idx = Math.floor(Math.random() * enabledAccounts.length)
-    if (!used.has(idx)) {
-      used.add(idx)
-      selected.push(enabledAccounts[idx])
+async function sendAutoMessageToUser(userId) {
+  try {
+    const account = loadAccount(userId)
+    if (!account || !account.lastChatFromUser) {
+      console.log(`[多用户微信机器人] 用户${userId}没有登录或没有聊天对象，跳过`)
+      return
     }
-  }
-  
-  console.log(`[多用户微信机器人] 选中了 ${selected.length} 个用户`)
-  
-  for (const account of selected) {
-    try {
-      const userId = account.userId
-      const message = await generateAutoMessage(userId, account)
-      
-      if (message) {
-        const config = getUserAutoMsgConfig(userId)
-        
-        console.log(`[多用户微信机器人] 给用户${userId}主动发消息: ${message}`)
-        
-        // 发送
-        await sendToWeixin({
-          userId,
-          toUser: config.lastChatFromUser,
-          text: message,
-          contextToken: null,
-          config: account,
-        })
-        
-        // 更新lastSent
-        setUserAutoMsgConfig(userId, { [AUTO_MSG_LAST_SENT_KEY]: Date.now() })
-      }
-    } catch (e) {
-      console.error(`[多用户微信机器人] 发送消息出错`, e)
+    
+    const message = await generateAutoMessage(userId, account)
+    if (!message) {
+      console.log(`[多用户微信机器人] 生成用户${userId}的主动消息失败，跳过`)
+      return
     }
+    
+    console.log(`[多用户微信机器人] 给用户${userId}主动发消息: ${message}`)
+    
+    // 发送
+    await sendToWeixin({
+      userId,
+      toUser: account.lastChatFromUser,
+      text: message,
+      contextToken: null,
+      config: account,
+    })
+    
+    // 更新lastSent
+    setUserAutoMsgConfig(userId, { [AUTO_MSG_LAST_SENT_KEY]: Date.now() })
+    // 主动发完后，清空下次发送时间，等用户下次回复时再让AI决定
+    setUserAutoMsgConfig(userId, { nextAutoMsgTime: 0 })
+    userNextAutoMsgTime.delete(userId)
+  } catch (e) {
+    console.error(`[多用户微信机器人] 发送用户${userId}主动消息出错`, e)
   }
-  
-  // 安排下次
-  scheduleNextAutoMessage()
 }
 
-// 安排下次自动发消息
-function scheduleNextAutoMessage() {
-  if (autoMsgTimeout) {
-    clearTimeout(autoMsgTimeout)
+// 全局检查定时器：每分钟检查所有用户是否到了发送时间
+function checkAllUsersForAutoMsg() {
+  const now = Date.now()
+  const accounts = getAllAccounts()
+  
+  for (const account of accounts) {
+    if (!account.enabled || !account[AUTO_MSG_ENABLED_KEY] || !account.lastChatFromUser) {
+      continue
+    }
+    
+    const userId = account.userId
+    let nextTime = userNextAutoMsgTime.get(userId)
+    if (!nextTime) {
+      // 内存里没有，从文件读
+      const config = getUserAutoMsgConfig(userId)
+      nextTime = config.nextAutoMsgTime
+      if (nextTime) {
+        userNextAutoMsgTime.set(userId, nextTime)
+      }
+    }
+    
+    if (!nextTime) {
+      // 还没有设置过，设置一个
+      resetUserNextAutoMsgTime(userId)
+      continue
+    }
+    
+    if (now >= nextTime) {
+      // 到了时间，发送
+      console.log(`[多用户微信机器人] 用户${userId}到了主动发消息时间`)
+      sendAutoMessageToUser(userId).catch(e => console.error(`[多用户微信机器人] 发送用户${userId}主动消息出错`, e))
+    }
   }
-  
-  // 计算下次两小时后的时间
-  const now = new Date()
-  const nextHour = now.getHours() + 2
-  const targetHour = nextHour % 24
-  const targetMinutes = getRandomMinutes() // 随机15-45分钟
-  
-  const targetTime = new Date(now)
-  targetTime.setHours(targetHour)
-  targetTime.setMinutes(targetMinutes)
-  targetTime.setSeconds(0)
-  targetTime.setMilliseconds(0)
-  
-  // 如果已经过了，加一天
-  if (targetTime <= now) {
-    targetTime.setDate(targetTime.getDate() + 1)
-  }
-  
-  const delay = targetTime - now
-  
-  console.log(`[多用户微信机器人] 下次自动发消息时间: ${targetTime.toLocaleString()}`)
-  
-  // 保存到全局变量
-  nextAutoMsgTime = targetTime
-  
-  autoMsgTimeout = setTimeout(() => {
-    sendAutoMessages().catch(e => console.error('[多用户微信机器人] 发送主动消息出错', e))
-  }, delay)
 }
 
 // 启动自动发消息
 function startAutoMsgTimer() {
   console.log('[多用户微信机器人] 启动自动发消息功能')
-  scheduleNextAutoMessage()
+  
+  // 先加载所有用户的下次时间到内存缓存
+  const accounts = getAllAccounts()
+  for (const account of accounts) {
+    if (account.nextAutoMsgTime) {
+      userNextAutoMsgTime.set(account.userId, account.nextAutoMsgTime)
+    }
+  }
+  
+  // 每分钟检查一次
+  if (autoMsgInterval) {
+    clearInterval(autoMsgInterval)
+  }
+  autoMsgInterval = setInterval(() => {
+    checkAllUsersForAutoMsg()
+  }, 60 * 1000)
 }
 
 // 停止自动发消息
 function stopAutoMsgTimer() {
-  if (autoMsgTimeout) {
-    clearTimeout(autoMsgTimeout)
-    autoMsgTimeout = null
+  if (autoMsgInterval) {
+    clearInterval(autoMsgInterval)
+    autoMsgInterval = null
   }
   console.log('[多用户微信机器人] 停止自动发消息功能')
 }
@@ -1160,6 +1153,7 @@ async function callAI(prompt, userId) {
   
   // 所有可用API都失败了
   console.error('[多用户微信机器人] 所有API调用失败')
+  
   return null
 }
 
@@ -1541,6 +1535,24 @@ async function processSystemCommand(userId, account, fromUser, contextToken, com
       infoText += `AI最后主动说: 从未主动说过\n`
     }
     
+    if (autoMsgEnabled) {
+      let nextTime = autoMsgConfig.nextAutoMsgTime
+      if (nextTime > 0) {
+        const nextDate = new Date(nextTime)
+        const now = new Date()
+        const diff = nextDate - now
+        const hours = Math.floor(diff / (1000 * 60 * 60))
+        const minutes = Math.floor((diff % (1000 * 60 * 60)) / (1000 * 60))
+        
+        let timeText = ''
+        if (hours > 0) timeText += `${hours}小时`
+        if (minutes > 0) timeText += `${minutes}分钟`
+        if (!timeText) timeText = '即将'
+        
+        infoText += `下次主动说: ${nextDate.toLocaleString('zh-CN')} (${timeText}后)\n`
+      }
+    }
+    
     if (autoMsgConfig.lastChatFromUser) {
       infoText += `最后聊天对象: ${autoMsgConfig.lastChatFromUser.substring(0, 20)}...\n`
     }
@@ -1606,7 +1618,7 @@ async function processSystemCommand(userId, account, fromUser, contextToken, com
   // 命令9: #开启AI主动发送消息
   if (cmd === '开启ai主动发送消息' || cmd === '开启自动发送消息') {
     setUserAutoMsgConfig(userId, { [AUTO_MSG_ENABLED_KEY]: true })
-    await sendToWeixin({ userId, toUser: fromUser, text: '✅ 已开启AI主动发送消息！\n\n每两小时AI会随机选择时间，主动和你聊天', contextToken, config: account, disableSplit: true })
+    await sendToWeixin({ userId, toUser: fromUser, text: '✅ 已开启AI主动发送消息！\n\n每次和你聊天后，AI会自己决定下次什么时候主动找你', contextToken, config: account, disableSplit: true })
     return
   }
   
@@ -1675,9 +1687,11 @@ ${mergedText}
 回复格式：
 1. 先判断这段对话是否重要（重要→true，不重要→false）
 2. 然后是你的回复内容
-3. 格式：
+3. 最后，决定你下次想主动给用户发消息的时间（从现在开始的30分钟到2小时之间，只写分钟数，比如：45分钟、60分钟、90分钟等）
+4. 完整格式：
 [重要: true/false]
 [你的回复内容]
+[下次主动发消息: XX分钟]
 
 直接用第一人称回复，自然口语，像真人一样聊天。
 
@@ -1735,6 +1749,28 @@ ${mergedText}
     
     console.log('[多用户微信机器人] 清理后回复:', finalResponse)
     console.log('[多用户微信机器人] 是否保存记忆:', isImportant)
+    
+    // 提取下次主动发消息的时间
+    let nextAutoMsgMinutes = null
+    const nextTimeMatch = aiResponse.match(/\[下次主动发消息\s*:\s*(\d+)\s*分钟/i)
+    if (nextTimeMatch) {
+      nextAutoMsgMinutes = parseInt(nextTimeMatch[1])
+      // 范围检查：30分钟到2小时（120分钟）
+      if (nextAutoMsgMinutes < 30) nextAutoMsgMinutes = 30
+      if (nextAutoMsgMinutes > 120) nextAutoMsgMinutes = 120
+      // 从回复中移除这个标签
+      finalResponse = finalResponse.replace(nextTimeMatch[0], '').trim()
+    }
+    
+    // 如果AI没有返回时间，默认用随机时间（30-90分钟）
+    if (!nextAutoMsgMinutes) {
+      nextAutoMsgMinutes = 30 + Math.floor(Math.random() * 91) // 30-120分钟
+    }
+    
+    // 保存下次主动发消息的时间
+    const nextAutoMsgTimestamp = Date.now() + nextAutoMsgMinutes * 60 * 1000
+    setUserAutoMsgConfig(userId, { nextAutoMsgTime: nextAutoMsgTimestamp })
+    console.log(`[多用户微信机器人] 用户${userId}下次主动发消息时间已设置: ${new Date(nextAutoMsgTimestamp).toLocaleString()}`)
     
     // 如果清理后回复是空的，使用清理标签后的纯文本（去掉[重要:xx]）
     if (!finalResponse || !finalResponse.trim()) {
@@ -2456,20 +2492,28 @@ export class AI_MultiUser_Bot extends plugin {
       return true
     }
     
-    // 检查是否有下次发送时间
-    if (!nextAutoMsgTime) {
+    // 获取该用户的下次发送时间
+    let nextTime = userNextAutoMsgTime.get(userId)
+    if (!nextTime) {
+      // 内存里没有，从文件读
+      const config = getUserAutoMsgConfig(userId)
+      nextTime = config.nextAutoMsgTime
+    }
+    
+    if (!nextTime) {
+      // 还没有设置，告诉用户等下次聊天后会设置
       await this.reply([
         segment.reply(messageId),
         segment.at(userId),
         ' ',
-        '还没有安排下次主动发消息的时间，请稍后再试'
+        '暂未设置下次主动发消息的时间\n等你下次和AI聊天后会自动设置'
       ])
       return true
     }
     
-    // 计算剩余时间
+    const nextDate = new Date(nextTime)
     const now = new Date()
-    const diff = nextAutoMsgTime - now
+    const diff = nextDate - now
     const hours = Math.floor(diff / (1000 * 60 * 60))
     const minutes = Math.floor((diff % (1000 * 60 * 60)) / (1000 * 60))
     const seconds = Math.floor((diff % (1000 * 60)) / 1000)
@@ -2480,7 +2524,7 @@ export class AI_MultiUser_Bot extends plugin {
     if (seconds > 0) timeText += `${seconds}秒`
     if (!timeText) timeText = '即将'
     
-    const result = `📅 下次主动发消息\n────────────────\n时间：${nextAutoMsgTime.toLocaleString('zh-CN')}\n剩余：${timeText}`
+    const result = `📅 下次主动发消息\n────────────────\n时间：${nextDate.toLocaleString('zh-CN')}\n剩余：${timeText}`
     
     await this.reply([
       segment.reply(messageId),
