@@ -74,6 +74,8 @@ let currentApiIndex = 0
 
 // 自动发消息的定时器
 let autoMsgTimeout = null
+// 下次自动发消息的时间
+let nextAutoMsgTime = null
 
 // 加载名称绑定
 function loadNameBindings() {
@@ -899,6 +901,9 @@ function scheduleNextAutoMessage() {
   
   console.log(`[多用户微信机器人] 下次自动发消息时间: ${targetTime.toLocaleString()}`)
   
+  // 保存到全局变量
+  nextAutoMsgTime = targetTime
+  
   autoMsgTimeout = setTimeout(() => {
     sendAutoMessages().catch(e => console.error('[多用户微信机器人] 发送主动消息出错', e))
   }, delay)
@@ -1103,13 +1108,35 @@ async function callAI(prompt, userId) {
 
       if (response.ok) {
         const data = await response.json()
-        let result = data.choices?.[0]?.message?.content
+        console.log(`[多用户微信机器人] API ${api.url} 完整返回:`, JSON.stringify(data, null, 2))
         
-        // 只检查最基本的有效性
+        let result = null
+        
+        // 尝试多种返回格式
+        if (data.choices?.[0]?.message?.content) {
+          result = data.choices[0].message.content
+        } else if (data.message?.content) {
+          result = data.message.content
+        } else if (data.content) {
+          result = data.content
+        } else if (data.text) {
+          result = data.text
+        } else if (data.response) {
+          result = data.response
+        }
+        
+        // 用户自定义 API 放宽检查！
+        if (!result && useUserApi) {
+          console.warn(`[多用户微信机器人] 用户自定义 API 返回非常规格式，尝试直接转字符串`)
+          result = JSON.stringify(data)
+        }
+        
         if (!result) {
           console.warn(`[多用户微信机器人] API ${api.url} 返回空内容:`, data)
-          // 标记这个API失败
-          apiHealth.set(api.url, { ok: false, lastCheck: Date.now() })
+          // 用户自定义 API 即使返回空也继续尝试下一个，不要标记！
+          if (!useUserApi) {
+            apiHealth.set(api.url, { ok: false, lastCheck: Date.now() })
+          }
           continue
         }
         
@@ -1779,7 +1806,8 @@ export class AI_MultiUser_Bot extends plugin {
         { reg: '^[#＃]\\s*推广$', fnc: 'showPromotion' },
         { reg: '^[#＃]\\s*帮助\\s*多用户$', fnc: 'showHelp' },
         { reg: '^[#＃]\\s*微信\\s*机器人\\s*登录', fnc: 'adminLoginWeixin' },
-        { reg: '^[#＃]\\s*查询\\s*用户', fnc: 'queryUser' }
+        { reg: '^[#＃]\\s*查询\\s*用户', fnc: 'queryUser' },
+        { reg: '^[#＃]\\s*预知\\s*下次\\s*主动\\s*发送$', fnc: 'predictNextAutoMsg' }
       ]
     })
     
@@ -2264,7 +2292,7 @@ export class AI_MultiUser_Bot extends plugin {
   
   async showHelp() {
     await this.reply(
-      `多用户微信机器人帮助:\n\n📱 登录与人设\n#登录微信AI - 获取二维码登录微信\n#微信机器人登录 <名称> - 管理员通过名称登录（绑定到当前QQ）\n#更改人设 人设内容 - 修改自己的人设（需已登录并运行）\n  （支持多行、任意长度的人设内容）\n\n📝 人设与记忆\n#当前人设 - 查看当前人设（需已登录）\n#清除记忆 - 清除自己的聊天记忆（需已登录）\n#我的信息 - 查看个人信息和统计数据（需已登录）\n#查询用户 <名称/QQ号> - 查询用户绑定关系\n\n🤖 机器人管理\n#微信机器人在线列表 - 查看所有账号状态\n#停止机器人 [用户ID] - 停止指定账号\n#启动机器人 [用户ID] - 启动指定账号\n#删除机器人 [用户ID] - 删除账号\n\n📖 其他\n#关于 - 查看项目信息和开源说明\n#推广 - 查看推广计划，帮我们宣传\n#帮助多用户 - 查看此帮助\n\n普通用户: #登录微信AI 登录自己的微信\n主人: 可以管理所有账号`
+      `多用户微信机器人帮助:\n\n📱 登录与人设\n#登录微信AI - 获取二维码登录微信\n#微信机器人登录 <名称> - 管理员通过名称登录（绑定到当前QQ）\n#更改人设 人设内容 - 修改自己的人设（需已登录并运行）\n  （支持多行、任意长度的人设内容）\n\n📝 人设与记忆\n#当前人设 - 查看当前人设（需已登录）\n#清除记忆 - 清除自己的聊天记忆（需已登录）\n#我的信息 - 查看个人信息和统计数据（需已登录）\n#查询用户 <名称/QQ号> - 查询用户绑定关系\n\n🤖 机器人管理\n#微信机器人在线列表 - 查看所有账号状态\n#停止机器人 [用户ID] - 停止指定账号\n#启动机器人 [用户ID] - 启动指定账号\n#删除机器人 [用户ID] - 删除账号\n\n📅 其他功能\n#预知下次主动发送 - 查看下次 AI 主动发消息的时间（需已开启）\n#站点状态 - 查看 API 站点状态\n#关于 - 查看项目信息和开源说明\n#推广 - 查看推广计划，帮我们宣传\n#帮助多用户 - 查看此帮助\n\n普通用户: #登录微信AI 登录自己的微信\n主人: 可以管理所有账号`
     )
     return true
   }
@@ -2397,6 +2425,69 @@ export class AI_MultiUser_Bot extends plugin {
     }
     
     await this.reply(result)
+    return true
+  }
+  
+  async predictNextAutoMsg() {
+    const userId = this.e.user_id
+    const messageId = this.e.message_id
+    
+    // 检查是否登录了微信
+    const account = loadAccount(userId)
+    if (!account) {
+      await this.reply([
+        segment.reply(messageId),
+        segment.at(userId),
+        ' ',
+        '您还没有注册微信机器人，请先发送 #登录微信AI'
+      ])
+      return true
+    }
+    
+    // 检查是否开启了自动发消息
+    const autoMsgEnabled = account[AUTO_MSG_ENABLED_KEY] || false
+    if (!autoMsgEnabled) {
+      await this.reply([
+        segment.reply(messageId),
+        segment.at(userId),
+        ' ',
+        '您还没有开启 AI 主动发送消息功能\n请先在微信中发送 #开启AI主动发送消息'
+      ])
+      return true
+    }
+    
+    // 检查是否有下次发送时间
+    if (!nextAutoMsgTime) {
+      await this.reply([
+        segment.reply(messageId),
+        segment.at(userId),
+        ' ',
+        '还没有安排下次主动发消息的时间，请稍后再试'
+      ])
+      return true
+    }
+    
+    // 计算剩余时间
+    const now = new Date()
+    const diff = nextAutoMsgTime - now
+    const hours = Math.floor(diff / (1000 * 60 * 60))
+    const minutes = Math.floor((diff % (1000 * 60 * 60)) / (1000 * 60))
+    const seconds = Math.floor((diff % (1000 * 60)) / 1000)
+    
+    let timeText = ''
+    if (hours > 0) timeText += `${hours}小时`
+    if (minutes > 0) timeText += `${minutes}分钟`
+    if (seconds > 0) timeText += `${seconds}秒`
+    if (!timeText) timeText = '即将'
+    
+    const result = `📅 下次主动发消息\n────────────────\n时间：${nextAutoMsgTime.toLocaleString('zh-CN')}\n剩余：${timeText}`
+    
+    await this.reply([
+      segment.reply(messageId),
+      segment.at(userId),
+      ' ',
+      result
+    ])
     return true
   }
 }
