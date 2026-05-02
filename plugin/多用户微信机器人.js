@@ -292,25 +292,38 @@ function logError(error, context = '') {
   console.error(`[多用户微信机器人] [ERROR] ${context}`, error)
 }
 
-// 加载管理员列表
-function loadMasters() {
-  if (!fs.existsSync(MASTER_FILE)) {
-    return []
+// 验证是否为管理员 - 使用框架自带的 this.e.isMaster
+function isAdmin(userId, e) {
+  if (e && typeof e.isMaster === 'boolean') {
+    return e.isMaster
   }
+  // 回退逻辑（备用）
   try {
-    const content = fs.readFileSync(MASTER_FILE, 'utf8')
-    const data = JSON.parse(content)
-    return Array.isArray(data.qqList) ? data.qqList : []
+    const frameworkConfig = path.join(process.cwd(), 'data', 'server_bots', '1145', 'chatbot.yaml')
+    if (fs.existsSync(frameworkConfig)) {
+      const YAML = require('yaml')
+      const content = fs.readFileSync(frameworkConfig, 'utf8')
+      const data = YAML.parse(content)
+      if (data.master && data.master.qq) {
+        const masters = Array.isArray(data.master.qq) ? data.master.qq : [data.master.qq]
+        return masters.some(id => String(id) === String(userId))
+      }
+    }
   } catch (e) {
-    console.warn('[多用户微信机器人] 加载管理员列表失败', e)
-    return []
+    console.warn('[多用户微信机器人] 加载框架配置失败', e)
   }
-}
-
-// 验证是否为管理员
-function isAdmin(userId) {
-  const masters = loadMasters()
-  return masters.includes(String(userId))
+  // 最后的回退
+  if (fs.existsSync(MASTER_FILE)) {
+    try {
+      const content = fs.readFileSync(MASTER_FILE, 'utf8')
+      const data = JSON.parse(content)
+      const masters = Array.isArray(data.qqList) ? data.qqList : []
+      return masters.includes(String(userId))
+    } catch (e) {
+      console.warn('[多用户微信机器人] 加载旧配置失败', e)
+    }
+  }
+  return false
 }
 
 // 加载名称绑定
@@ -2173,7 +2186,7 @@ export class AI_MultiUser_Bot extends plugin {
   
   async listOnlineBots() {
     const userId = this.e.user_id
-    if (!isAdmin(userId)) {
+    if (!isAdmin(userId, this.e)) {
       await this.reply('❌ 你没有管理员权限，无法使用此命令')
       return true
     }
@@ -2307,7 +2320,7 @@ export class AI_MultiUser_Bot extends plugin {
   
   async stopBot() {
     const userId = this.e.user_id
-    if (!isAdmin(userId)) {
+    if (!isAdmin(userId, this.e)) {
       await this.reply('❌ 你没有管理员权限，无法使用此命令')
       return true
     }
@@ -2332,7 +2345,7 @@ export class AI_MultiUser_Bot extends plugin {
   
   async startBot() {
     const userId = this.e.user_id
-    if (!isAdmin(userId)) {
+    if (!isAdmin(userId, this.e)) {
       await this.reply('❌ 你没有管理员权限，无法使用此命令')
       return true
     }
@@ -2357,7 +2370,7 @@ export class AI_MultiUser_Bot extends plugin {
   
   async deleteBot() {
     const userId = this.e.user_id
-    if (!isAdmin(userId)) {
+    if (!isAdmin(userId, this.e)) {
       await this.reply('❌ 你没有管理员权限，无法使用此命令')
       return true
     }
@@ -2611,7 +2624,7 @@ export class AI_MultiUser_Bot extends plugin {
   
   async adminLoginWeixin() {
     const userId = this.e.user_id
-    if (!isAdmin(userId)) {
+    if (!isAdmin(userId, this.e)) {
       await this.reply('❌ 你没有管理员权限，无法使用此命令')
       return true
     }
