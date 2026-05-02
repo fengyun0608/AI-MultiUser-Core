@@ -1021,13 +1021,6 @@ async function callAI(prompt, userId) {
   const officialApiUrls = (officialConfig?.apis || []).map(api => api.url)
   
   if (userApiConfig && userApiConfig.enabled && userApiConfig.apis && userApiConfig.apis.length > 0) {
-    // 检查用户自定义API是否与官方API冲突
-    const hasConflict = userApiConfig.apis.some(api => officialApiUrls.includes(api.url))
-    if (hasConflict) {
-      console.error('[多用户微信机器人] 用户自定义API与官方API冲突')
-      return '__CONFLICT__'
-    }
-    
     // 使用用户自定义的API
     useUserApi = true
     apisToUse = userApiConfig.apis
@@ -1320,6 +1313,22 @@ async function handleApiConfigStep(userId, account, fromUser, contextToken, user
     return
   }
   
+  if (state.step === 'confirm') {
+    // 处理用户确认
+    const confirmText = userInput.trim().toLowerCase()
+    
+    if (confirmText === '是' || confirmText === 'yes' || confirmText === 'y' || confirmText === '继续') {
+      // 用户选择继续，进入 key 步骤
+      apiConfigStates.set(userId, { step: 'key', data: { url: state.data.url } })
+      await sendToWeixin({ userId, toUser: fromUser, text: '好的，API 地址已记录！现在请输入你的 API Key（密钥）', contextToken, config: account, disableSplit: true })
+    } else {
+      // 用户选择取消
+      apiConfigStates.delete(userId)
+      await sendToWeixin({ userId, toUser: fromUser, text: '已取消配置 API', contextToken, config: account, disableSplit: true })
+    }
+    return
+  }
+  
   if (state.step === 'url') {
     // 处理 URL
     let url = userInput.trim()
@@ -1348,7 +1357,16 @@ async function handleApiConfigStep(userId, account, fromUser, contextToken, user
     const officialConfig = loadPluginConfig()
     const officialApiUrls = (officialConfig?.apis || []).map(api => api.url)
     if (officialApiUrls.includes(url)) {
-      await sendToWeixin({ userId, toUser: fromUser, text: '❌ 当前API供应商与官方冲突，请使用其他API供应商', contextToken, config: account, disableSplit: true })
+      // 保存URL和冲突警告状态，等待用户确认
+      apiConfigStates.set(userId, { step: 'confirm', data: { url, isConflict: true } })
+      await sendToWeixin({ 
+        userId, 
+        toUser: fromUser, 
+        text: '⚠️ 提示\n\n该API供应商可能和官方的API调用相同，调用相同时可能还会出现429限流等问题。\n\n是否继续配置？\n回复 "是" 继续，回复 "否" 取消', 
+        contextToken, 
+        config: account, 
+        disableSplit: true 
+      })
       return
     }
     
@@ -1446,10 +1464,13 @@ async function processSystemCommand(userId, account, fromUser, contextToken, com
       memoryFilesCount = files.length
     }
     
+    const autoMsgConfig = getUserAutoMsgConfig(userId)
+    const autoMsgEnabled = currentAccount?.[AUTO_MSG_ENABLED_KEY] || false
+    
     let infoText = '📋 我的信息\n\n'
     infoText += `QQ ID: ${userId}\n`
     infoText += `微信 ID: ${currentAccount?.accountId || '未知'}\n`
-    infoText += `状态: ${accountMonitors.has(userId) ? '🟢 运行中' : '🔴 已停止'}\n`
+    infoText += `机器人状态: ${accountMonitors.has(userId) ? '🟢 运行中' : '🔴 已停止'}\n`
     infoText += `聊天记录数: ${chatMemory.length}\n`
     infoText += `记忆文件数: ${memoryFilesCount}\n`
     
@@ -1460,6 +1481,27 @@ async function processSystemCommand(userId, account, fromUser, contextToken, com
     if (currentAccount?.lastActiveAt) {
       const date = new Date(currentAccount.lastActiveAt)
       infoText += `最后活跃: ${date.toLocaleString('zh-CN')}\n`
+    }
+    
+    // 自动发消息状态
+    infoText += `\n📬 AI主动发消息\n`
+    infoText += `状态: ${autoMsgEnabled ? '✅ 已开启' : '❌ 已关闭'}\n`
+    
+    if (autoMsgConfig.lastActive > 0) {
+      const lastActiveDate = new Date(autoMsgConfig.lastActive)
+      const idleTime = Date.now() - autoMsgConfig.lastActive
+      infoText += `你最后说话: ${lastActiveDate.toLocaleString('zh-CN')} (${formatTimeDiff(idleTime)}前)\n`
+    }
+    
+    if (autoMsgConfig.lastSent > 0) {
+      const lastSentDate = new Date(autoMsgConfig.lastSent)
+      infoText += `AI最后主动说: ${lastSentDate.toLocaleString('zh-CN')}\n`
+    } else {
+      infoText += `AI最后主动说: 从未主动说过\n`
+    }
+    
+    if (autoMsgConfig.lastChatFromUser) {
+      infoText += `最后聊天对象: ${autoMsgConfig.lastChatFromUser.substring(0, 20)}...\n`
     }
     
     await sendToWeixin({ userId, toUser: fromUser, text: infoText, contextToken, config: account, disableSplit: true })
@@ -1618,19 +1660,6 @@ ${mergedText}
   console.log('[多用户微信机器人] 调用AI中...')
   const aiResponse = await callAI(prompt, userId)
   console.log('[多用户微信机器人] AI回复:', aiResponse)
-  
-  if (aiResponse === '__CONFLICT__') {
-    // 用户自定义API与官方冲突
-    await sendToWeixin({
-      userId,
-      toUser: fromUser,
-      text: '❌ 当前自定义API供应商与官方冲突，请使用 #切换官方 切换到官方API，或使用 #配置API 更换其他API供应商',
-      contextToken: lastMessage.contextToken,
-      config: account,
-      disableSplit: true
-    })
-    return
-  }
   
   if (aiResponse && aiResponse.trim()) {
     // 解析AI回复，提取重要性
@@ -2033,6 +2062,9 @@ export class AI_MultiUser_Bot extends plugin {
     const daysSinceCreation = Math.floor((now - createdAt) / (1000 * 60 * 60 * 24))
     const daysSinceLastActive = Math.floor((now - lastActiveAt) / (1000 * 60 * 60 * 24))
     
+    const autoMsgConfig = getUserAutoMsgConfig(userId)
+    const autoMsgEnabled = account[AUTO_MSG_ENABLED_KEY] || false
+    
     let infoText = '📊 我的信息\n'
     infoText += '────────────────\n'
     infoText += `QQ号：${userId}\n`
@@ -2054,6 +2086,26 @@ export class AI_MultiUser_Bot extends plugin {
     infoText += `距上次在线：${daysSinceLastActive} 天\n`
     infoText += '────────────────\n'
     infoText += `🧠 记忆条数：${memoryCount} 条\n`
+    infoText += '────────────────\n'
+    infoText += `📬 AI主动发消息\n`
+    infoText += `状态：${autoMsgEnabled ? '✅ 已开启' : '❌ 已关闭'}\n`
+    
+    if (autoMsgConfig.lastActive > 0) {
+      const lastActiveDate = new Date(autoMsgConfig.lastActive)
+      const idleTime = Date.now() - autoMsgConfig.lastActive
+      infoText += `你最后说话：${lastActiveDate.toLocaleString('zh-CN')} (${formatTimeDiff(idleTime)}前)\n`
+    }
+    
+    if (autoMsgConfig.lastSent > 0) {
+      const lastSentDate = new Date(autoMsgConfig.lastSent)
+      infoText += `AI最后主动说：${lastSentDate.toLocaleString('zh-CN')}\n`
+    } else {
+      infoText += `AI最后主动说：从未主动说过\n`
+    }
+    
+    if (autoMsgConfig.lastChatFromUser) {
+      infoText += `最后聊天对象：${autoMsgConfig.lastChatFromUser.substring(0, 20)}...\n`
+    }
     
     await this.reply(infoText)
     return true
@@ -2061,16 +2113,27 @@ export class AI_MultiUser_Bot extends plugin {
 
   async changePersona() {
     const userId = this.e.user_id
+    const messageId = this.e.message_id
     const account = loadAccount(userId)
     
     if (!account || !account.token) {
-      await this.reply('未找到账号或未登录，请先发送 #登录微信AI 登录')
+      await this.reply([
+        segment.reply(messageId),
+        segment.at(userId),
+        ' ',
+        '未找到账号或未登录，请先发送 #登录微信AI 登录'
+      ])
       return true
     }
     
     const isRunning = accountMonitors.has(userId)
     if (!isRunning) {
-      await this.reply('账号未运行，请先发送 #启动机器人 启动账号')
+      await this.reply([
+        segment.reply(messageId),
+        segment.at(userId),
+        ' ',
+        '账号未运行，请先发送 #启动机器人 启动账号'
+      ])
       return true
     }
     
@@ -2129,7 +2192,12 @@ export class AI_MultiUser_Bot extends plugin {
     
     // 检查人设内容是否有效
     if (!newPersona || newPersona.trim() === '') {
-      await this.reply('请输入人设内容，格式：\n#更改人设 你的人设内容\n\n提示：支持多行、任意长度的人设')
+      await this.reply([
+        segment.reply(messageId),
+        segment.at(userId),
+        ' ',
+        '请输入人设内容，格式：\n#更改人设 你的人设内容\n\n提示：支持多行、任意长度的人设'
+      ])
       return true
     }
     
@@ -2137,7 +2205,12 @@ export class AI_MultiUser_Bot extends plugin {
     savePersona(userId, newPersona)
     console.log('[多用户微信机器人] 人设已保存')
     
-    await this.reply('人设已更新！立即生效')
+    await this.reply([
+      segment.reply(messageId),
+      segment.at(userId),
+      ' ',
+      '人设已更新！立即生效'
+    ])
     return true
   }
   
