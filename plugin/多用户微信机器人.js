@@ -1038,6 +1038,13 @@ async function callAI(prompt, userId) {
   const availableApis = []
   const now = Date.now()
   for (const api of apisToUse) {
+    // 用户自定义API：跳过健康检查，直接加入可用列表！
+    if (useUserApi) {
+      availableApis.push(api)
+      continue
+    }
+    
+    // 官方API才检查健康
     const cached = apiHealth.get(api.url)
     if (cached && (now - cached.lastCheck) < API_CHECK_INTERVAL) {
       if (cached.ok) {
@@ -1052,10 +1059,17 @@ async function callAI(prompt, userId) {
     }
   }
   
-  if (availableApis.length === 0) {
+  // 用户自定义API即使全部失败也用
+  if (availableApis.length === 0 && !useUserApi) {
     console.error('[多用户微信机器人] 没有可用的API')
     return null
   }
+  
+  // 如果是用户自定义API但没有可用的，直接用用户配置的全部
+  if (availableApis.length === 0 && useUserApi) {
+    availableApis.push(...apisToUse)
+  }
+  
   console.log(`[多用户微信机器人] 可用API数量: ${availableApis.length}/${apisToUse.length}`)
 
   // 只在可用的API中轮询
