@@ -212,6 +212,62 @@ function cleanupUserData(userId) {
   console.log(`[多用户微信机器人] 已清理用户${userId}的缓存数据`)
 }
 
+// 获取API的可用模型列表
+async function getAvailableModels(url, key) {
+  try {
+    // 先尝试把 /chat/completions 替换成 /models
+    let modelsUrl = url
+    if (modelsUrl.includes('/chat/completions')) {
+      modelsUrl = modelsUrl.replace('/chat/completions', '/models')
+    } else if (modelsUrl.endsWith('/v1')) {
+      modelsUrl = modelsUrl + '/models'
+    } else if (modelsUrl.includes('/v1/')) {
+      // 已经有 v1/ 但不是 completions，尝试直接加 /models
+      modelsUrl = modelsUrl.replace(/\/v1\/.*$/, '/v1/models')
+    } else {
+      // 尝试直接加 /v1/models
+      if (modelsUrl.endsWith('/')) {
+        modelsUrl = modelsUrl + 'v1/models'
+      } else {
+        modelsUrl = modelsUrl + '/v1/models'
+      }
+    }
+    
+    console.log(`[多用户微信机器人] [获取模型] 尝试地址: ${modelsUrl}`)
+    
+    const response = await fetch(modelsUrl, {
+      method: 'GET',
+      headers: {
+        'Authorization': `Bearer ${key}`
+      },
+      signal: AbortSignal.timeout(10000)
+    })
+    
+    if (response.ok) {
+      const data = await response.json()
+      console.log(`[多用户微信机器人] [获取模型] 成功:`, JSON.stringify(data).substring(0, 500))
+      
+      let models = []
+      if (data.data && Array.isArray(data.data)) {
+        models = data.data.map(m => m.id).filter(id => id)
+      } else if (data.models && Array.isArray(data.models)) {
+        models = data.models.map(m => m.id || m.name).filter(id => id)
+      } else if (Array.isArray(data)) {
+        models = data.map(m => m.id || m.name).filter(id => id)
+      }
+      
+      return models
+    } else {
+      const errorText = await response.text()
+      console.warn(`[多用户微信机器人] [获取模型] 失败: ${response.status}, ${errorText}`)
+      return null
+    }
+  } catch (e) {
+    console.warn(`[多用户微信机器人] [获取模型] 异常:`, e.message)
+    return null
+  }
+}
+
 // 插件卸载时清理所有资源
 export async function cleanUp() {
   console.log('[多用户微信机器人] 开始清理资源...')
@@ -233,6 +289,9 @@ export async function cleanUp() {
   
   // 清理所有配置状态
   apiConfigStates.clear()
+  
+  // 清理已处理的消息缓存
+  processedMessages.clear()
   
   // 清理监控状态
   for (const [key, monitorInfo] of accountMonitors.entries()) {
@@ -258,6 +317,10 @@ const userDebounceTimers = new Map()
 
 // API配置状态管理：{ [userId]: { step: 'url'|'key'|'model', data: { url?: string, key?: string } } }
 const apiConfigStates = new Map()
+
+// 已处理的消息缓存（用于去重）：key是`${userId}_${seq}`或者`${userId}_${clientId}`
+const processedMessages = new Map()
+const MAX_CACHED_MESSAGES = 1000 // 最多缓存1000条消息，防止内存泄漏
 
 // 全局变量：API轮询索引、用户下次主动发消息时间、自动发消息定时器
 let currentApiIndex = 0
@@ -699,9 +762,14 @@ async function pollQRCodeLoop(sessionKey) {
           // 先停止旧的监听，确保新的监听能启动
           stopAccountMonitor(sessionKey)
           // 等待一小会儿再启动新的监听
+          console.log(`[多用户微信机器人] 等待 500ms 确保旧监听完全停止...`)
           await new Promise(r => setTimeout(r, 500))
+          // 确保 get_updates_buf 是空的，防止获取旧消息
+          account.get_updates_buf = ''
+          saveAccount(sessionKey, account)
+          // 启动新监听
           startAccountMonitor(sessionKey, account)
-          console.log(`[多用户微信机器人] ${sessionKey} 监听已重启`)
+          console.log(`[多用户微信机器人] ${sessionKey} 监听已启动`)
           break
       }
     } catch (err) {
@@ -712,34 +780,44 @@ async function pollQRCodeLoop(sessionKey) {
 }
 
 function startAccountMonitor(userId, account) {
-  if (accountMonitors.has(userId)) {
-    console.log(`[多用户微信机器人] ${userId} 已有监听在运行`)
-    return
-  }
+  // 先停止旧的，不管有没有在运行
+  console.log(`[多用户微信机器人] 准备启动 ${userId} 监听，先停止旧的...`)
+  stopAccountMonitor(userId)
   
-  console.log(`[多用户微信机器人] 启动 ${userId} 消息监听...`)
+  // 再等待一小会儿
+  console.log(`[多用户微信机器人] 等待 200ms 确保旧监听停止...`)
   
   const abort = new AbortController()
   accountMonitors.set(userId, abort)
   
+  console.log(`[多用户微信机器人] 启动 ${userId} 消息监听...`)
+  
   monitorAccountLoop(userId, account, abort.signal).catch(err => {
     console.error(`[多用户微信机器人] ${userId} 监听出错`, err.message)
-    accountMonitors.delete(userId)
+    // 出错时清理
+    if (accountMonitors.get(userId) === abort) {
+      accountMonitors.delete(userId)
+    }
   })
 }
 
 function stopAccountMonitor(userId) {
   const abort = accountMonitors.get(userId)
   if (abort) {
+    console.log(`[多用户微信机器人] 停止 ${userId} 监听...`)
     abort.abort()
     accountMonitors.delete(userId)
     console.log(`[多用户微信机器人] ${userId} 已停止`)
+  } else {
+    console.log(`[多用户微信机器人] ${userId} 没有在运行的监听`)
   }
 }
 
 async function monitorAccountLoop(userId, account, signal) {
   let errorCount = 0
   const MAX_ERRORS = 5
+  
+  console.log(`[多用户微信机器人] ${userId} 监听循环已启动`)
   
   while (!signal.aborted) {
     try {
@@ -768,9 +846,11 @@ async function monitorAccountLoop(userId, account, signal) {
       // 成功了，重置错误计数
       errorCount = 0
       
+      // 立即保存 get_updates_buf，防止重复获取
+      let needSave = false
       if (resp.get_updates_buf) {
         currentAccount.get_updates_buf = resp.get_updates_buf
-        saveAccount(userId, currentAccount)
+        needSave = true
       }
       
       if (resp.msgs && resp.msgs.length > 0) {
@@ -778,6 +858,10 @@ async function monitorAccountLoop(userId, account, signal) {
         for (const msg of resp.msgs) {
           await processAccountMessage(userId, currentAccount, msg)
         }
+      }
+      
+      if (needSave) {
+        saveAccount(userId, currentAccount)
       }
       
     } catch (err) {
@@ -791,6 +875,9 @@ async function monitorAccountLoop(userId, account, signal) {
         // 重新加载账号并启动
         const freshAccount = loadAccount(userId)
         if (freshAccount && freshAccount.token && freshAccount.enabled) {
+          // 清空 get_updates_buf 防止重复消息
+          freshAccount.get_updates_buf = ''
+          saveAccount(userId, freshAccount)
           await new Promise(r => setTimeout(r, 1000))
           startAccountMonitor(userId, freshAccount)
           console.log(`[多用户微信机器人] ${userId} 监听已重启`)
@@ -801,6 +888,8 @@ async function monitorAccountLoop(userId, account, signal) {
       await new Promise(r => setTimeout(r, 2000))
     }
   }
+  
+  console.log(`[多用户微信机器人] ${userId} 监听循环已停止`)
 }
 
 function getPersonaPath(userId) {
@@ -1289,6 +1378,8 @@ async function callSingleApi(api, prompt, isUserApi = false) {
   
   for (let retryCount = 0; retryCount <= API_RETRY_TIMES; retryCount++) {
     try {
+      console.log(`[多用户微信机器人] [API调用] 尝试: ${api.url} (模型: ${api.model})`)
+      
       const response = await fetch(api.url, {
         method: 'POST',
         headers: {
@@ -1309,42 +1400,60 @@ async function callSingleApi(api, prompt, isUserApi = false) {
         signal: AbortSignal.timeout(API_CALL_TIMEOUT_MS)
       })
 
+      const duration = Date.now() - startTime
+      
       if (response.ok) {
         const data = await response.json()
-        const duration = Date.now() - startTime
-        console.log(`[多用户微信机器人] API ${api.url} 调用成功 (${duration}ms)`)
+        console.log(`[多用户微信机器人] [API调用] 成功 (${duration}ms), 响应:`, JSON.stringify(data).substring(0, 500))
         
         let result = null
         
-        // 尝试多种返回格式
+        // 尝试多种返回格式，支持几乎所有可能的API
         if (data.choices?.[0]?.message?.content) {
           result = data.choices[0].message.content
+        } else if (data.choices?.[0]?.delta?.content) {
+          result = data.choices[0].delta.content
+        } else if (data.choices?.[0]?.text) {
+          result = data.choices[0].text
+        } else if (data.choices?.[0]) {
+          const choice = data.choices[0]
+          if (choice.content) result = choice.content
+          else if (choice.text) result = choice.text
+          else if (choice.message) result = typeof choice.message === 'string' ? choice.message : (choice.message.content || JSON.stringify(choice.message))
         } else if (data.message?.content) {
           result = data.message.content
+        } else if (data.message) {
+          result = typeof data.message === 'string' ? data.message : JSON.stringify(data.message)
         } else if (data.content) {
           result = data.content
         } else if (data.text) {
           result = data.text
         } else if (data.response) {
           result = data.response
-        }
-        
-        // 用户自定义 API 放宽检查
-        if (!result && isUserApi) {
+        } else if (data.output) {
+          result = data.output
+        } else if (data.result) {
+          result = data.result
+        } else if (data.data) {
+          result = typeof data.data === 'string' ? data.data : JSON.stringify(data.data)
+        } else if (isUserApi) {
+          // 对于用户自定义API，如果以上都没有，直接返回整个响应的字符串形式
           result = JSON.stringify(data)
         }
         
-        if (result) {
+        if (result && result.trim()) {
+          console.log(`[多用户微信机器人] [API调用] 提取到响应: ${result.substring(0, 200)}${result.length > 200 ? '...' : ''}`)
           return result
+        } else {
+          console.warn(`[多用户微信机器人] [API调用] 响应格式异常，无法提取内容`)
         }
       } else {
-        const duration = Date.now() - startTime
         const errorText = await response.text()
-        console.warn(`[多用户微信机器人] API ${api.url} 失败 (${duration}ms): ${response.status}, 详情: ${errorText}`)
+        console.warn(`[多用户微信机器人] [API调用] 失败 (${duration}ms): 状态码=${response.status}, 详情: ${errorText}`)
       }
     } catch (e) {
       const duration = Date.now() - startTime
-      console.warn(`[多用户微信机器人] API ${api.url} 异常 (${duration}ms):`, e.message)
+      console.warn(`[多用户微信机器人] [API调用] 异常 (${duration}ms):`, e.message, e.stack)
     }
     
     // 如果还需要重试，等待一段时间
@@ -1512,6 +1621,69 @@ async function sendToWeixin({ userId, toUser, text, contextToken, config, disabl
 }
 
 async function processAccountMessage(userId, account, msg) {
+  // 第一步：提取消息文本
+  let text = ''
+  if (msg.item_list && msg.item_list.length > 0) {
+    for (const item of msg.item_list) {
+      if (item.type === 1 && item.text_item?.text) {
+        text = item.text_item.text
+        break
+      } else if (item.type === 3 && item.voice_item?.text) {
+        text = item.voice_item.text
+        break
+      }
+    }
+  }
+  
+  // 第二步：生成多个去重 Key，防止漏判
+  const deduplicationKeys = []
+  
+  // Key1：优先用 seq
+  if (msg.seq) {
+    deduplicationKeys.push(`seq_${userId}_${msg.seq}`)
+  }
+  
+  // Key2：用 client_id
+  if (msg.client_id) {
+    deduplicationKeys.push(`client_${userId}_${msg.client_id}`)
+  }
+  
+  // Key3：用内容 + 发送者 + 时间（最可靠）
+  if (msg.from_user_id && text.trim()) {
+    // 取文本前200字符 + 发送者 + 当前时间向下取整到10秒
+    const textHash = text.trim().substring(0, 200)
+    const timeBucket = Math.floor(Date.now() / 10000)
+    deduplicationKeys.push(`content_${userId}_${msg.from_user_id}_${textHash}_${timeBucket}`)
+  }
+  
+  // 第三步：检查是否任何一个 Key 已经处理过
+  let isDuplicate = false
+  for (const key of deduplicationKeys) {
+    if (processedMessages.has(key)) {
+      console.log(`[多用户微信机器人] 检测到重复消息（通过${key}），跳过`)
+      isDuplicate = true
+      break
+    }
+  }
+  
+  if (isDuplicate) return
+  
+  // 第四步：记录所有去重 Key
+  for (const key of deduplicationKeys) {
+    processedMessages.set(key, Date.now())
+  }
+  
+  // 第五步：防止缓存过大：超过MAX_CACHED_MESSAGES就删除最早的一半
+  if (processedMessages.size > MAX_CACHED_MESSAGES) {
+    const entries = Array.from(processedMessages.entries())
+      .sort((a, b) => a[1] - b[1])
+      .slice(0, Math.floor(MAX_CACHED_MESSAGES / 2))
+    
+    for (const [key] of entries) {
+      processedMessages.delete(key)
+    }
+  }
+  
   const safeMsg = { 
     seq: msg.seq,
     from_user_id: msg.from_user_id ? '[USER_ID]' : undefined,
@@ -1526,22 +1698,6 @@ async function processAccountMessage(userId, account, msg) {
     context_token: '[REDACTED]'
   }
   console.log('[多用户微信机器人] processAccountMessage 开始处理', JSON.stringify(safeMsg))
-  
-  let text = ''
-  if (msg.item_list && msg.item_list.length > 0) {
-    for (const item of msg.item_list) {
-      if (item.type === 1 && item.text_item?.text) {
-        text = item.text_item.text
-        console.log('[多用户微信机器人] 提取到文本:', text)
-        break
-      } else if (item.type === 3 && item.voice_item?.text) {
-        text = item.voice_item.text
-        console.log(`[多用户微信机器人] ${userId} 识别到语音: ${text}`)
-        break
-      }
-    }
-  }
-  
   console.log('[多用户微信机器人] 最终提取的 text:', text)
   
   if (text && text.trim()) {
@@ -1636,16 +1792,18 @@ async function handleApiConfigStep(userId, account, fromUser, contextToken, user
       return
     }
     
-    // 自动补全 URL
+    // 更智能的自动补全 URL：支持各种中转商格式
     if (!url.includes('/chat/completions')) {
-      if (url.endsWith('/v1')) {
-        url = url + '/chat/completions'
-      } else if (url.endsWith('/v1/')) {
-        url = url + 'chat/completions'
+      if (url.includes('/v1')) {
+        // 已经有 v1 但没 completions，直接补
+        if (!url.endsWith('/')) url += '/'
+        url += 'chat/completions'
       } else if (url.endsWith('/')) {
-        url = url + 'v1/chat/completions'
+        // 结尾是 /，补 v1/chat/completions
+        url += 'v1/chat/completions'
       } else {
-        url = url + '/v1/chat/completions'
+        // 都没有，补 /v1/chat/completions
+        url += '/v1/chat/completions'
       }
       console.log(`[多用户微信机器人] 自动补全URL为: ${url}`)
     }
@@ -1680,9 +1838,31 @@ async function handleApiConfigStep(userId, account, fromUser, contextToken, user
       return
     }
     
+    // 先尝试获取可用模型
+    const models = await getAvailableModels(state.data.url, key)
+    
+    let promptText = '密钥已保存！最后请输入你想使用的模型名称\n\n'
+    
+    if (models && models.length > 0) {
+      // 展示可用模型
+      const modelList = models.slice(0, 15).map((m, i) => `- ${m}`).join('\n')
+      promptText += `✅ 成功获取可用模型（共 ${models.length} 个）：\n${modelList}${models.length > 15 ? '\n...' : ''}\n\n`
+    } else {
+      promptText += '无法获取可用模型，请直接输入你的服务商提供的模型名\n\n'
+    }
+    
+    promptText += '常用模型示例：\n- deepseek-chat (DeepSeek)\n- gpt-4o (OpenAI)\n- claude-3-5-sonnet-20241022 (Claude)\n- 或者直接用你服务商的默认模型名'
+    
     // 保存 KEY，进入下一步
-    apiConfigStates.set(userId, { step: 'model', data: { ...state.data, key } })
-    await sendToWeixin({ userId, toUser: fromUser, text: '密钥已保存！最后请输入你想使用的模型名称，例如：deepseek-v4-pro、gpt-4o 等', contextToken, config: account, disableSplit: true })
+    apiConfigStates.set(userId, { step: 'model', data: { ...state.data, key, availableModels: models } })
+    await sendToWeixin({ 
+      userId, 
+      toUser: fromUser, 
+      text: promptText, 
+      contextToken, 
+      config: account, 
+      disableSplit: true 
+    })
     
   } else if (state.step === 'model') {
     // 处理模型
@@ -1703,7 +1883,7 @@ async function handleApiConfigStep(userId, account, fromUser, contextToken, user
     // 清除状态
     apiConfigStates.delete(userId)
     
-    const successText = `✅ API 配置成功！\n\n已保存配置：\n地址: ${url}\n模型: ${model}\n\n现在已切换到自定义 API 模式`
+    const successText = `✅ API 配置成功！\n\n已保存配置：\n地址: ${url}\n模型: ${model}\n\n现在已切换到自定义 API 模式，试试看吧！`
     await sendToWeixin({ userId, toUser: fromUser, text: successText, contextToken, config: account, disableSplit: true })
   }
 }
@@ -2114,6 +2294,22 @@ export class AI_MultiUser_Bot extends plugin {
     
     if (!existingAccountsLoaded) {
       existingAccountsLoaded = true
+      
+      // 清理所有旧缓存和监听
+      console.log('[多用户微信机器人] 初始化中：清理旧缓存...')
+      
+      // 清理旧的 processedMessages 缓存
+      processedMessages.clear()
+      console.log('[多用户微信机器人] 已清理消息去重缓存')
+      
+      // 停止所有旧监听
+      const allUserIds = Array.from(accountMonitors.keys())
+      for (const userId of allUserIds) {
+        console.log(`[多用户微信机器人] 停止旧监听：${userId}`)
+        stopAccountMonitor(userId)
+      }
+      
+      // 加载现有账号
       this.loadExistingAccounts()
     }
   }
